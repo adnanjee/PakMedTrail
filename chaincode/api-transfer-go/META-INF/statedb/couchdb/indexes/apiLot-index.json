@@ -1,0 +1,6 @@
+{
+  "index": { "fields": ["docType", "ownerMSP", "status", "name"] },
+  "ddoc": "indexApiLotByOwnerStatusName",
+  "name": "indexApiLotByOwnerStatusName",
+  "type": "json"
+}
