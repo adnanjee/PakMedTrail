@@ -1,0 +1,6 @@
+{
+  "index": { "fields": ["docType", "batchId", "retailMSP", "timestamp"] },
+  "ddoc": "indexRDispenseByBatchRetail",
+  "name": "indexRDispenseByBatchRetail",
+  "type": "json"
+}

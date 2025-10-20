@@ -3,10 +3,10 @@
     "name": "collectionAPISensitive",
     "policy": {
       "identities": [
-        {"role": {"name": "member", "mspId": "Org1MSP"}},
-        {"role": {"name": "member", "mspId": "Org2MSP"}}
+        { "role": { "name": "member", "mspId": "supplierMSP" } },
+        { "role": { "name": "member", "mspId": "manufacturerMSP" } }
       ],
-      "policy": {"2-of": [{"signed-by": 0}, {"signed-by": 1}]}
+      "policy": { "2-of": [ { "signed-by": 0 }, { "signed-by": 1 } ] }
     },
     "requiredPeerCount": 1,
     "maxPeerCount": 2,

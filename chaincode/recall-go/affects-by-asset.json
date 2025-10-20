@@ -1,0 +1,6 @@
+{
+  "index": { "fields": ["docType", "assetType", "assetId", "recallId", "createdAt"] },
+  "ddoc": "indexAffectsByAsset",
+  "name": "indexAffectsByAsset",
+  "type": "json"
+}

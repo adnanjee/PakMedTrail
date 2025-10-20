@@ -1,0 +1,17 @@
+[
+  {
+    "name": "collectionRetailSensitive",
+    "policy": {
+      "identities": [
+        { "role": { "name": "member", "mspId": "distributorMSP" } },
+        { "role": { "name": "member", "mspId": "retailMSP" } }
+      ],
+      "policy": { "2-of": [ { "signed-by": 0 }, { "signed-by": 1 } ] }
+    },
+    "requiredPeerCount": 1,
+    "maxPeerCount": 2,
+    "blockToLive": 0,
+    "memberOnlyRead": true,
+    "memberOnlyWrite": true
+  }
+]

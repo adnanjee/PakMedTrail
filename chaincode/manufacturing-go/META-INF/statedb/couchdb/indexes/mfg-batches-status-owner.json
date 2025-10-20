@@ -1,0 +1,6 @@
+{
+  "index": { "fields": ["docType", "status", "ownerMSP", "formulaId"] },
+  "ddoc": "indexMfgBatchesByStatusOwner",
+  "name": "indexMfgBatchesByStatusOwner",
+  "type": "json"
+}

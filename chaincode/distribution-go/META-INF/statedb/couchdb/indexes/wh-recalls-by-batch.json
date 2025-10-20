@@ -1,0 +1,6 @@
+{
+  "index": { "fields": ["docType", "batchId", "status", "createdAt"] },
+  "ddoc": "indexWhRecallsByBatchStatus",
+  "name": "indexWhRecallsByBatchStatus",
+  "type": "json"
+}
