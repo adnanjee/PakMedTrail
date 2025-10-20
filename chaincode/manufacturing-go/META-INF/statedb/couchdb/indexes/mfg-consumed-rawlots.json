@@ -1,0 +1,6 @@
+{
+  "index": { "fields": ["docType", "batchId", "rawLotId", "quantity", "timestamp"] },
+  "ddoc": "indexMfgConsumedRawLots",
+  "name": "indexMfgConsumedRawLots",
+  "type": "json"
+}

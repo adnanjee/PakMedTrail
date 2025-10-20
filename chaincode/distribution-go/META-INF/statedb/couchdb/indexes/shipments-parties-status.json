@@ -1,0 +1,7 @@
+{
+  "index": { "fields": ["docType", "fromMSP", "toMSP", "status", "batchId", "createdAt"] },
+  "ddoc": "indexWhShipmentsByPartiesStatus",
+  "name": "indexWhShipmentsByPartiesStatus",
+  "type": "json"
+}
+

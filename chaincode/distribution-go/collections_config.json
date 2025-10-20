@@ -1,10 +1,10 @@
 [
   {
-    "name": "collectionAPISensitive",
+    "name": "collectionWholesaleSensitive",
     "policy": {
       "identities": [
-        { "role": { "name": "member", "mspId": "supplierMSP" } },
-        { "role": { "name": "member", "mspId": "manufacturerMSP" } }
+        { "role": { "name": "member", "mspId": "manufacturerMSP" } },
+        { "role": { "name": "member", "mspId": "distributorMSP" } }
       ],
       "policy": { "2-of": [ { "signed-by": 0 }, { "signed-by": 1 } ] }
     },

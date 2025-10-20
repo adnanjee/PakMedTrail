@@ -1,0 +1,6 @@
+{
+  "index": { "fields": ["docType", "createdAt"] },
+  "ddoc": "indexMfgBatchesByCreatedAt",
+  "name": "indexMfgBatchesByCreatedAt",
+  "type": "json"
+}

@@ -1,0 +1,6 @@
+{
+  "index": { "fields": ["docType", "createdAt"] },
+  "ddoc": "indexRShipmentsByCreatedAt",
+  "name": "indexRShipmentsByCreatedAt",
+  "type": "json"
+}

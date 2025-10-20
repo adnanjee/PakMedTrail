@@ -1,10 +1,10 @@
-module github.com/adnanjee/pharma-fabric/chaincode/api-transfer-go
+module github.com/adnanjee/PakMedTrail/chaincode/recall-go
 
-go 1.25.1
+go 1.25.3
 
 require (
 	github.com/hyperledger/fabric-chaincode-go v0.0.0-20240704073638-9fb89180dc17
-	github.com/hyperledger/fabric-contract-api-go v1.2.0
+	github.com/hyperledger/fabric-contract-api-go v1.2.2
 )
 
 require (

@@ -1,0 +1,6 @@
+{
+  "index": { "fields": ["docType", "assetType", "assetId", "status", "updatedAt"] },
+  "ddoc": "indexQuarantineByAsset",
+  "name": "indexQuarantineByAsset",
+  "type": "json"
+}
