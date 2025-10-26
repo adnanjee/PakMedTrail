@@ -1,13 +1,7 @@
 [
   {
     "name": "collectionMfgSensitive",
-    "policy": {
-      "identities": [
-        { "role": { "name": "member", "mspId": "manufacturerMSP" } },
-        { "role": { "name": "member", "mspId": "drapMSP" } }
-      ],
-      "policy": { "2-of": [ { "signed-by": 0 }, { "signed-by": 1 } ] }
-    },
+    "policy": "OR('manufacturerMSP.member','drapMSP.member')",
     "requiredPeerCount": 1,
     "maxPeerCount": 2,
     "blockToLive": 0,
