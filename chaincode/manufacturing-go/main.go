@@ -22,6 +22,8 @@ import (
    - DRAP (drapMSP) must approve the finished batch before transfer
    - Manufacturer -> Distributor transfer with accept/reject + SBE
    - Rich queries + paginated query helper
+   - Automatic expiry for pending transfers (7 days)
+   - PROPER CHAIN OF CUSTODY: ProducerMSP never changes, CurrentOwnerMSP tracks ownership
 
    Channel: rawmaterialsupply
    External CC: apitransfer (Chaincode #1 for raw API lots)
@@ -31,8 +33,8 @@ import (
 
 const (
 	// External chaincode (Chaincode #1 for raw APIs)
-	apiCCName  = "apitransfer"
-	apiChannel = "" // empty => same channel; keep empty for atomic CC2CC
+	apiCCName  = "apitransfer" // CORRECTED: matches your deployed chaincode name
+	apiChannel = ""            // empty => same channel; keep empty for atomic CC2CC
 
 	// MSPs
 	mspDRAP = "drapMSP"
@@ -45,6 +47,7 @@ const (
 	StatusAccepted        = "ACCEPTED"
 	StatusRejected        = "REJECTED"
 	StatusDestroyed       = "DESTROYED"
+	StatusExpired         = "EXPIRED" // New status for expired transfers
 
 	// DocTypes
 	DocTypeFormulation = "drug.formulation"
@@ -59,8 +62,12 @@ const (
 	EventBatchAccepted      = "BatchTransferAccepted"
 	EventBatchRejected      = "BatchTransferRejected"
 	EventBatchCancelled     = "BatchTransferCancelled"
+	EventBatchExpired       = "BatchTransferExpired" // New event for expired transfers
 	EventDRAPApproved       = "DrugDRAPApproved"
 	EventDRAPRejected       = "DrugDRAPRejected"
+
+	// Transfer expiry settings
+	TransferExpiryDays = 7
 )
 
 // ---------------- Data Models ----------------
@@ -85,23 +92,24 @@ type InputUse struct {
 
 // DrugBatch is the produced lot of finished drug.
 type DrugBatch struct {
-	DocType      string     `json:"docType"` // "drug.batch"
-	BatchID      string     `json:"batchId"`
-	DrugCode     string     `json:"drugCode"`
-	Quantity     float64    `json:"quantity"` // output units
-	Unit         string     `json:"unit"`
-	ProducerMSP  string     `json:"producerMSP"`
-	Status       string     `json:"status"`
-	Inputs       []InputUse `json:"inputs"` // actual raw consumptions
-	DRAPApproved bool       `json:"drapApproved"`
-	DRAPNote     string     `json:"drapNote,omitempty"`
-	DRAPAt       string     `json:"drapAt,omitempty"`
-
-	ProposedOwnerMSP string            `json:"proposedOwnerMSP,omitempty"` // for distributor transfer
-	Metadata         map[string]string `json:"metadata,omitempty"`
-
-	CreatedAt string `json:"createdAt"`
-	UpdatedAt string `json:"updatedAt"`
+	DocType            string            `json:"docType"` // "drug.batch"
+	BatchID            string            `json:"batchId"`
+	DrugCode           string            `json:"drugCode"`
+	Quantity           float64           `json:"quantity"` // output units
+	Unit               string            `json:"unit"`
+	ProducerMSP        string            `json:"producerMSP"`     // NEVER CHANGES - who manufactured the drug
+	CurrentOwnerMSP    string            `json:"currentOwnerMSP"` // CHANGES - who currently owns the batch
+	Status             string            `json:"status"`
+	Inputs             []InputUse        `json:"inputs"` // actual raw consumptions
+	DRAPApproved       bool              `json:"drapApproved"`
+	DRAPNote           string            `json:"drapNote"`
+	DRAPAt             string            `json:"drapAt"`
+	ProposedOwnerMSP   string            `json:"proposedOwnerMSP"`
+	TransferProposedAt string            `json:"transferProposedAt"`
+	TransferExpiresAt  string            `json:"transferExpiresAt"`
+	Metadata           map[string]string `json:"metadata"`
+	CreatedAt          string            `json:"createdAt"`
+	UpdatedAt          string            `json:"updatedAt"`
 }
 
 // PagedBatchesResult is a helper return type for paginated queries.
@@ -215,7 +223,8 @@ func (c *ManufacturingContract) CreateFormulation(ctx contractapi.TransactionCon
 }
 
 func (c *ManufacturingContract) ReadFormulation(ctx contractapi.TransactionContextInterface, drugCode string) (*DrugFormulation, error) {
-	key := "FORM_" + strings.TrimSpace(drugCode)
+	drugCode = strings.TrimSpace(drugCode)
+	key := "FORM_" + drugCode
 	var f DrugFormulation
 	if err := getJSON(ctx, key, &f); err != nil {
 		return nil, err
@@ -314,8 +323,9 @@ func (c *ManufacturingContract) ProduceDrug(
 	}
 
 	// Validate that provided >= required for each ingredient in formulation
+	const epsilon = 1e-9
 	for ing, req := range required {
-		if provided[ing] < req-1e-9 {
+		if provided[ing] < req-epsilon {
 			return nil, fmt.Errorf("insufficient ingredient %s: need %.6f, provided %.6f", ing, req, provided[ing])
 		}
 	}
@@ -337,12 +347,13 @@ func (c *ManufacturingContract) ProduceDrug(
 			return nil, fmt.Errorf("apitransfer.ReadLot(%s) failed: %s", x.LotID, string(resp.Payload))
 		}
 		var lot struct {
-			DocType  string  `json:"docType"`
-			LotID    string  `json:"lotId"`
-			Name     string  `json:"name"`
-			OwnerMSP string  `json:"ownerMSP"`
-			Quantity float64 `json:"quantity"`
-			Status   string  `json:"status"`
+			DocType      string  `json:"docType"`
+			LotID        string  `json:"lotId"`
+			Name         string  `json:"name"`
+			OwnerMSP     string  `json:"ownerMSP"`
+			Quantity     float64 `json:"quantity"`
+			Status       string  `json:"status"`
+			DRAPApproved bool    `json:"drapApproved"`
 		}
 		if err := json.Unmarshal(resp.Payload, &lot); err != nil {
 			return nil, fmt.Errorf("unmarshal lot %s: %w", x.LotID, err)
@@ -356,7 +367,11 @@ func (c *ManufacturingContract) ProduceDrug(
 		if lot.Status == StatusPendingTransfer {
 			return nil, fmt.Errorf("lot %s is pending transfer", x.LotID)
 		}
-		if lot.Quantity < amount-1e-9 {
+		// Check DRAP approval for raw API lot
+		if !lot.DRAPApproved {
+			return nil, fmt.Errorf("lot %s is not DRAP approved", x.LotID)
+		}
+		if lot.Quantity < amount-epsilon {
 			return nil, fmt.Errorf("lot %s insufficient quantity: have %.6f need %.6f", x.LotID, lot.Quantity, amount)
 		}
 
@@ -374,20 +389,27 @@ func (c *ManufacturingContract) ProduceDrug(
 		})
 	}
 
-	// Create batch
+	// Create batch - FIXED: Initialize all required fields without omitempty
 	now := nowRFC3339(ctx)
 	b := &DrugBatch{
-		DocType:      DocTypeBatch,
-		BatchID:      batchID,
-		DrugCode:     f.DrugCode,
-		Quantity:     outputQty,
-		Unit:         strings.TrimSpace(unit),
-		ProducerMSP:  callerMSP,
-		Status:       statusStock,
-		Inputs:       uses,
-		DRAPApproved: false,
-		CreatedAt:    now,
-		UpdatedAt:    now,
+		DocType:            DocTypeBatch,
+		BatchID:            batchID,
+		DrugCode:           f.DrugCode,
+		Quantity:           outputQty,
+		Unit:               strings.TrimSpace(unit),
+		ProducerMSP:        callerMSP, // Original manufacturer - NEVER CHANGES
+		CurrentOwnerMSP:    callerMSP, // Current owner - starts as manufacturer
+		Status:             statusStock,
+		Inputs:             uses,
+		DRAPApproved:       false,
+		DRAPNote:           "",
+		DRAPAt:             "",
+		ProposedOwnerMSP:   "",
+		TransferProposedAt: "",
+		TransferExpiresAt:  "",
+		Metadata:           make(map[string]string),
+		CreatedAt:          now,
+		UpdatedAt:          now,
 	}
 	if err := putJSON(ctx, key, b); err != nil {
 		return nil, err
@@ -395,7 +417,9 @@ func (c *ManufacturingContract) ProduceDrug(
 	emit(ctx, EventDrugProduced, b)
 
 	// SBE: require Manufacturer (producer) + DRAP to endorse the next decision (approval/rejection)
-	_ = c.setSBE(ctx, key, b.ProducerMSP, mspDRAP)
+	if err := c.setSBE(ctx, key, b.CurrentOwnerMSP, mspDRAP); err != nil {
+		return nil, fmt.Errorf("set SBE: %w", err)
+	}
 
 	return b, nil
 }
@@ -420,9 +444,9 @@ func (c *ManufacturingContract) ApproveDrugBatchByDRAP(ctx contractapi.Transacti
 	if err := c.putBatch(ctx, b); err != nil {
 		return nil, err
 	}
-	// After decision, limit SBE to current owner (producer) only
-	if err := c.setSBE(ctx, "BATCH_"+b.BatchID, b.ProducerMSP); err != nil {
-		return nil, fmt.Errorf("reset SBE to owner: %w", err)
+	// After DRAP approval, keep both current owner and DRAP in SBE for transfer operations
+	if err := c.setSBE(ctx, "BATCH_"+b.BatchID, b.CurrentOwnerMSP, mspDRAP); err != nil {
+		return nil, fmt.Errorf("set SBE: %w", err)
 	}
 	emit(ctx, EventDRAPApproved, map[string]any{"batchId": b.BatchID, "note": b.DRAPNote, "at": b.DRAPAt})
 	return b, nil
@@ -446,8 +470,9 @@ func (c *ManufacturingContract) RejectDrugBatchByDRAP(ctx contractapi.Transactio
 	if err := c.putBatch(ctx, b); err != nil {
 		return nil, err
 	}
-	if err := c.setSBE(ctx, "BATCH_"+b.BatchID, b.ProducerMSP); err != nil {
-		return nil, fmt.Errorf("reset SBE to owner: %w", err)
+	// After DRAP rejection, keep both current owner and DRAP in SBE
+	if err := c.setSBE(ctx, "BATCH_"+b.BatchID, b.CurrentOwnerMSP, mspDRAP); err != nil {
+		return nil, fmt.Errorf("set SBE: %w", err)
 	}
 	emit(ctx, EventDRAPRejected, map[string]any{"batchId": b.BatchID, "reason": b.DRAPNote, "at": b.DRAPAt})
 	return b, nil
@@ -461,7 +486,7 @@ func (c *ManufacturingContract) ProposeBatchTransfer(ctx contractapi.Transaction
 	if err != nil {
 		return nil, err
 	}
-	if err := c.checkProducer(ctx, b); err != nil {
+	if err := c.checkCurrentOwner(ctx, b); err != nil {
 		return nil, err
 	}
 	if !b.DRAPApproved {
@@ -470,13 +495,37 @@ func (c *ManufacturingContract) ProposeBatchTransfer(ctx contractapi.Transaction
 	if b.Status == StatusPendingTransfer {
 		return nil, errors.New("transfer already pending")
 	}
-	b.ProposedOwnerMSP = strings.TrimSpace(proposedOwnerMSP)
+
+	proposedOwnerMSP = strings.TrimSpace(proposedOwnerMSP)
+	if proposedOwnerMSP == "" {
+		return nil, errors.New("proposedOwnerMSP cannot be empty")
+	}
+	if proposedOwnerMSP == b.CurrentOwnerMSP {
+		return nil, errors.New("cannot transfer to current owner")
+	}
+
+	// Use transaction timestamp for consistency across all peers
+	txTime, err := ctx.GetStub().GetTxTimestamp()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get transaction timestamp: %w", err)
+	}
+
+	// Convert to time.Time
+	txTimeTime := time.Unix(txTime.Seconds, int64(txTime.Nanos))
+
+	b.ProposedOwnerMSP = proposedOwnerMSP
 	b.Status = StatusPendingTransfer
+	b.TransferProposedAt = txTimeTime.UTC().Format(time.RFC3339)
+
+	// Set expiry time (7 days from transaction time) - using same timestamp for consistency
+	expiryTime := txTimeTime.UTC().Add(time.Hour * 24 * TransferExpiryDays)
+	b.TransferExpiresAt = expiryTime.Format(time.RFC3339)
+
 	if err := c.putBatch(ctx, b); err != nil {
 		return nil, err
 	}
-	// SBE: require producer + proposed owner
-	if err := c.setSBE(ctx, "BATCH_"+b.BatchID, b.ProducerMSP, b.ProposedOwnerMSP); err != nil {
+	// SBE: require current owner + proposed owner
+	if err := c.setSBE(ctx, "BATCH_"+b.BatchID, b.CurrentOwnerMSP, b.ProposedOwnerMSP); err != nil {
 		return nil, fmt.Errorf("set SBE: %w", err)
 	}
 	emit(ctx, EventBatchTransferProp, b)
@@ -491,17 +540,26 @@ func (c *ManufacturingContract) AcceptBatchTransfer(ctx contractapi.TransactionC
 	if b.Status != StatusPendingTransfer {
 		return nil, errors.New("no pending transfer")
 	}
+
+	// Check if transfer has expired
+	if c.isTransferExpired(b) {
+		return nil, errors.New("transfer has expired")
+	}
+
 	if err := c.checkProposedOwner(ctx, b); err != nil {
 		return nil, err
 	}
-	// Ownership notion for batches: producerMSP indicates current owner
-	b.ProducerMSP = b.ProposedOwnerMSP
+
+	// CORRECTED: Change current owner, NOT producer
+	b.CurrentOwnerMSP = b.ProposedOwnerMSP
 	b.ProposedOwnerMSP = ""
 	b.Status = StatusAccepted
+	b.TransferProposedAt = "" // Clear transfer timestamps
+	b.TransferExpiresAt = ""  // Clear transfer timestamps
 	if err := c.putBatch(ctx, b); err != nil {
 		return nil, err
 	}
-	if err := c.setSBE(ctx, "BATCH_"+b.BatchID, b.ProducerMSP); err != nil {
+	if err := c.setSBE(ctx, "BATCH_"+b.BatchID, b.CurrentOwnerMSP); err != nil {
 		return nil, fmt.Errorf("reset SBE to new owner: %w", err)
 	}
 	emit(ctx, EventBatchAccepted, b)
@@ -516,13 +574,21 @@ func (c *ManufacturingContract) RejectBatchTransfer(ctx contractapi.TransactionC
 	if b.Status != StatusPendingTransfer {
 		return nil, errors.New("no pending transfer")
 	}
+
+	// Check if transfer has expired
+	if c.isTransferExpired(b) {
+		return nil, errors.New("transfer has expired")
+	}
+
 	if err := c.checkProposedOwner(ctx, b); err != nil {
 		return nil, err
 	}
 	b.ProposedOwnerMSP = ""
 	b.Status = StatusRejected
+	b.TransferProposedAt = "" // Clear transfer timestamps
+	b.TransferExpiresAt = ""  // Clear transfer timestamps
 	if b.Metadata == nil {
-		b.Metadata = map[string]string{}
+		b.Metadata = make(map[string]string)
 	}
 	if rs := strings.TrimSpace(reason); rs != "" {
 		b.Metadata["lastRejectReason"] = rs
@@ -530,7 +596,7 @@ func (c *ManufacturingContract) RejectBatchTransfer(ctx contractapi.TransactionC
 	if err := c.putBatch(ctx, b); err != nil {
 		return nil, err
 	}
-	if err := c.setSBE(ctx, "BATCH_"+b.BatchID, b.ProducerMSP); err != nil {
+	if err := c.setSBE(ctx, "BATCH_"+b.BatchID, b.CurrentOwnerMSP); err != nil {
 		return nil, fmt.Errorf("reset SBE to owner: %w", err)
 	}
 	emit(ctx, EventBatchRejected, map[string]any{"batchId": b.BatchID, "reason": reason})
@@ -542,7 +608,7 @@ func (c *ManufacturingContract) CancelBatchTransfer(ctx contractapi.TransactionC
 	if err != nil {
 		return nil, err
 	}
-	if err := c.checkProducer(ctx, b); err != nil {
+	if err := c.checkCurrentOwner(ctx, b); err != nil {
 		return nil, err
 	}
 	if b.Status != StatusPendingTransfer {
@@ -550,8 +616,10 @@ func (c *ManufacturingContract) CancelBatchTransfer(ctx contractapi.TransactionC
 	}
 	b.ProposedOwnerMSP = ""
 	b.Status = statusStock
+	b.TransferProposedAt = "" // Clear transfer timestamps
+	b.TransferExpiresAt = ""  // Clear transfer timestamps
 	if b.Metadata == nil {
-		b.Metadata = map[string]string{}
+		b.Metadata = make(map[string]string)
 	}
 	if cs := strings.TrimSpace(reason); cs != "" {
 		b.Metadata["lastCancelReason"] = cs
@@ -559,21 +627,148 @@ func (c *ManufacturingContract) CancelBatchTransfer(ctx contractapi.TransactionC
 	if err := c.putBatch(ctx, b); err != nil {
 		return nil, err
 	}
-	if err := c.setSBE(ctx, "BATCH_"+b.BatchID, b.ProducerMSP); err != nil {
+	if err := c.setSBE(ctx, "BATCH_"+b.BatchID, b.CurrentOwnerMSP); err != nil {
 		return nil, fmt.Errorf("reset SBE to owner: %w", err)
 	}
 	emit(ctx, EventBatchCancelled, map[string]any{"batchId": b.BatchID, "reason": reason})
 	return b, nil
 }
 
-// DestroyBatch – marks batch as destroyed (owner only)
+// ---------------- Automatic Expiry Functionality ----------------
+
+// ExpireBatchTransfer can be called by anyone to expire a pending transfer that has passed its expiry time
+func (c *ManufacturingContract) ExpireBatchTransfer(ctx contractapi.TransactionContextInterface, batchID string) (*DrugBatch, error) {
+	b, err := c.readBatch(ctx, batchID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check if batch is in pending transfer status and has expired
+	if b.Status != StatusPendingTransfer {
+		return nil, errors.New("batch is not in pending transfer status")
+	}
+
+	if !c.isTransferExpired(b) {
+		return nil, errors.New("transfer has not expired yet")
+	}
+
+	// Mark as expired
+	b.Status = StatusExpired
+	if b.Metadata == nil {
+		b.Metadata = make(map[string]string)
+	}
+	b.Metadata["expiryReason"] = "Transfer not accepted within 7 days"
+	b.ProposedOwnerMSP = ""
+	b.TransferProposedAt = "" // Clear transfer timestamps
+	b.TransferExpiresAt = ""  // Clear transfer timestamps
+
+	if err := c.putBatch(ctx, b); err != nil {
+		return nil, err
+	}
+
+	// Reset SBE to only the current owner
+	if err := c.setSBE(ctx, "BATCH_"+b.BatchID, b.CurrentOwnerMSP); err != nil {
+		return nil, fmt.Errorf("reset SBE to owner: %w", err)
+	}
+
+	emit(ctx, EventBatchExpired, map[string]any{
+		"batchId": b.BatchID,
+		"reason":  "Transfer not accepted within 7 days",
+	})
+
+	return b, nil
+}
+
+// ExpireAllPendingTransfers can be called by anyone to expire all pending transfers that have passed their expiry time
+func (c *ManufacturingContract) ExpireAllPendingTransfers(ctx contractapi.TransactionContextInterface) ([]*DrugBatch, error) {
+	// Use transaction timestamp for consistency
+	txTime, err := ctx.GetStub().GetTxTimestamp()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get transaction timestamp: %w", err)
+	}
+	referenceTime := time.Unix(txTime.Seconds, int64(txTime.Nanos)).UTC()
+
+	// Query for all batches with pending transfer status
+	selector := map[string]any{
+		"selector": map[string]any{
+			"docType": DocTypeBatch,
+			"status":  StatusPendingTransfer,
+		},
+	}
+	qb, _ := json.Marshal(selector)
+
+	batches, err := queryBatches(ctx, string(qb))
+	if err != nil {
+		return nil, fmt.Errorf("failed to query pending transfers: %w", err)
+	}
+
+	var expiredBatches []*DrugBatch
+
+	for _, batch := range batches {
+		if batch.TransferExpiresAt != "" {
+			expiryTime, err := time.Parse(time.RFC3339, batch.TransferExpiresAt)
+			if err == nil && expiryTime.Before(referenceTime) {
+				// Expire this batch
+				batch.Status = StatusExpired
+				if batch.Metadata == nil {
+					batch.Metadata = make(map[string]string)
+				}
+				batch.Metadata["expiryReason"] = "Transfer not accepted within 7 days"
+				batch.ProposedOwnerMSP = ""
+				batch.TransferProposedAt = ""
+				batch.TransferExpiresAt = ""
+
+				if err := c.putBatch(ctx, batch); err != nil {
+					return nil, fmt.Errorf("failed to expire batch %s: %w", batch.BatchID, err)
+				}
+
+				// Reset SBE to only the current owner
+				if err := c.setSBE(ctx, "BATCH_"+batch.BatchID, batch.CurrentOwnerMSP); err != nil {
+					return nil, fmt.Errorf("reset SBE for batch %s: %w", batch.BatchID, err)
+				}
+
+				expiredBatches = append(expiredBatches, batch)
+
+				emit(ctx, EventBatchExpired, map[string]any{
+					"batchId": batch.BatchID,
+					"reason":  "Transfer not accepted within 7 days",
+				})
+			}
+		}
+	}
+
+	return expiredBatches, nil
+}
+
+// isTransferExpired checks if a batch transfer has expired
+func (c *ManufacturingContract) isTransferExpired(b *DrugBatch) bool {
+	if b.TransferExpiresAt == "" {
+		return false
+	}
+
+	expiryTime, err := time.Parse(time.RFC3339, b.TransferExpiresAt)
+	if err != nil {
+		return false
+	}
+
+	return time.Now().UTC().After(expiryTime)
+}
+
+// DestroyBatch – marks batch as destroyed (current owner only)
 func (c *ManufacturingContract) DestroyBatch(ctx contractapi.TransactionContextInterface, batchID string) (*DrugBatch, error) {
 	b, err := c.readBatch(ctx, batchID)
 	if err != nil {
 		return nil, err
 	}
-	if err := c.checkProducer(ctx, b); err != nil {
+	if err := c.checkCurrentOwner(ctx, b); err != nil {
 		return nil, err
+	}
+	// Add status validation
+	if b.Status == StatusPendingTransfer {
+		return nil, errors.New("cannot destroy batch with pending transfer")
+	}
+	if b.Status == StatusDestroyed {
+		return nil, errors.New("batch already destroyed")
 	}
 	b.Status = StatusDestroyed
 	if err := c.putBatch(ctx, b); err != nil {
@@ -592,8 +787,20 @@ func (c *ManufacturingContract) ReadBatch(ctx contractapi.TransactionContextInte
 func (c *ManufacturingContract) GetBatchesByOwner(ctx contractapi.TransactionContextInterface, ownerMSP string) ([]*DrugBatch, error) {
 	selector := map[string]any{
 		"selector": map[string]any{
+			"docType":         DocTypeBatch,
+			"currentOwnerMSP": ownerMSP,
+		},
+	}
+	qb, _ := json.Marshal(selector)
+	return queryBatches(ctx, string(qb))
+}
+
+// GetBatchesByProducer returns all batches produced by a specific manufacturer
+func (c *ManufacturingContract) GetBatchesByProducer(ctx contractapi.TransactionContextInterface, producerMSP string) ([]*DrugBatch, error) {
+	selector := map[string]any{
+		"selector": map[string]any{
 			"docType":     DocTypeBatch,
-			"producerMSP": ownerMSP,
+			"producerMSP": producerMSP,
 		},
 	}
 	qb, _ := json.Marshal(selector)
@@ -628,6 +835,7 @@ func (c *ManufacturingContract) keyExists(ctx contractapi.TransactionContextInte
 }
 
 func (c *ManufacturingContract) readBatch(ctx contractapi.TransactionContextInterface, batchID string) (*DrugBatch, error) {
+	batchID = strings.TrimSpace(batchID)
 	var b DrugBatch
 	if err := getJSON(ctx, "BATCH_"+batchID, &b); err != nil {
 		return nil, err
@@ -640,10 +848,10 @@ func (c *ManufacturingContract) putBatch(ctx contractapi.TransactionContextInter
 	return putJSON(ctx, "BATCH_"+b.BatchID, b)
 }
 
-func (c *ManufacturingContract) checkProducer(ctx contractapi.TransactionContextInterface, b *DrugBatch) error {
+func (c *ManufacturingContract) checkCurrentOwner(ctx contractapi.TransactionContextInterface, b *DrugBatch) error {
 	msp, _ := getMSP(ctx)
-	if b.ProducerMSP != msp {
-		return fmt.Errorf("access denied: caller MSP %s is not the owner %s", msp, b.ProducerMSP)
+	if b.CurrentOwnerMSP != msp {
+		return fmt.Errorf("access denied: caller MSP %s is not the current owner %s", msp, b.CurrentOwnerMSP)
 	}
 	return nil
 }
@@ -737,50 +945,3 @@ func main() {
 		panic(fmt.Errorf("start chaincode: %w", err))
 	}
 }
-
-/*
----------------------------
-CouchDB Index JSON (copy to files under:
- META-INF/statedb/couchdb/indexes/)
----------------------------
-
-1) batches-by-owner.json
-{
-  "index": { "fields": ["docType", "producerMSP", "status", "drugCode"] },
-  "ddoc": "indexBatchesByOwner",
-  "name": "indexBatchesByOwner",
-  "type": "json"
-}
-
-2) batches-by-status-owner-drap.json
-{
-  "index": { "fields": ["docType", "status", "producerMSP", "drapApproved", "drugCode"] },
-  "ddoc": "indexBatchesByStatusOwnerDrap",
-  "name": "indexBatchesByStatusOwnerDrap",
-  "type": "json"
-}
-
-3) batches-by-createdAt.json
-{
-  "index": { "fields": ["docType", "createdAt"] },
-  "ddoc": "indexBatchesByCreatedAt",
-  "name": "indexBatchesByCreatedAt",
-  "type": "json"
-}
-
-4) batches-by-drugcode-createdAt.json
-{
-  "index": { "fields": ["docType", "drugCode", "createdAt"] },
-  "ddoc": "indexBatchesByDrugAndCreatedAt",
-  "name": "indexBatchesByDrugAndCreatedAt",
-  "type": "json"
-}
-
-5) formulations-by-owner.json
-{
-  "index": { "fields": ["docType", "ownerMSP", "drugCode"] },
-  "ddoc": "indexFormulationsByOwner",
-  "name": "indexFormulationsByOwner",
-  "type": "json"
-}
-*/

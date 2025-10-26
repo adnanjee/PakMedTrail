@@ -21,12 +21,13 @@ const (
 	CollectionSensitive = "collectionAPISensitive"
 
 	// Business statuses (public)
-	StatusInStock         = "IN_STOCK"
-	StatusPendingTransfer = "PENDING_TRANSFER"
-	StatusAccepted        = "ACCEPTED"
-	StatusRejected        = "REJECTED"
-	StatusConsumed        = "CONSUMED"
-	StatusDestroyed       = "DESTROYED"
+	StatusPendingDRAPApproval = "PENDING_DRAP_APPROVAL" // NEW: Initial status for DRAP approval
+	StatusInStock             = "IN_STOCK"
+	StatusPendingTransfer     = "PENDING_TRANSFER"
+	StatusAccepted            = "ACCEPTED"
+	StatusRejected            = "REJECTED"
+	StatusConsumed            = "CONSUMED"
+	StatusDestroyed           = "DESTROYED"
 
 	// Events
 	EventLotCreated        = "LotCreated"
@@ -37,49 +38,61 @@ const (
 	EventTransferAccepted  = "TransferAccepted"
 	EventTransferRejected  = "TransferRejected"
 	EventTransferCancelled = "TransferCancelled"
+	EventTransferExpired   = "TransferExpired"
 
-	// New DRAP-related events
+	// DRAP-related events
 	EventDRAPApproved = "DRAPApproved"
 	EventDRAPRejected = "DRAPRejected"
 
-	// MSP ID for DRAP (as requested)
+	// MSP ID for DRAP
 	MSP_DRAP = "drapMSP"
+
+	// Transfer expiry duration (7 days)
+	TransferExpiryHours = 168
 )
 
 // ApiLot is the public state of an API lot (non-sensitive)
 type ApiLot struct {
-	DocType          string  `json:"docType"`
-	LotID            string  `json:"lotId"`
-	Name             string  `json:"name"`
-	BatchNumber      string  `json:"batchNumber"`
-	Quantity         float64 `json:"quantity"`
-	Unit             string  `json:"unit"`
-	ManufactureDate  string  `json:"manufactureDate,omitempty"`
-	ExpiryDate       string  `json:"expiryDate,omitempty"`
-	OwnerMSP         string  `json:"ownerMSP"`
-	SupplierMSP      string  `json:"supplierMSP"`
-	ProposedOwnerMSP string  `json:"proposedOwnerMSP,omitempty"`
-	Status           string  `json:"status"`
-
-	// DRAP gate: lot must be approved before it can be transferred
-	DRAPApproved bool   `json:"drapApproved"`
-	DRAPNote     string `json:"drapNote,omitempty"`
-	DRAPAt       string `json:"drapAt,omitempty"` // timestamp of last DRAP decision
-
-	Metadata  map[string]string `json:"metadata,omitempty"`
-	CreatedAt string            `json:"createdAt"`
-	UpdatedAt string            `json:"updatedAt"`
+	DocType            string            `json:"docType"`
+	LotID              string            `json:"lotId"`
+	Name               string            `json:"name"`
+	BatchNumber        string            `json:"batchNumber"`
+	Quantity           int64             `json:"quantity"`
+	Unit               string            `json:"unit"`
+	ManufactureDate    string            `json:"manufactureDate"`
+	ExpiryDate         string            `json:"expiryDate"`
+	OwnerMSP           string            `json:"ownerMSP"`
+	SupplierMSP        string            `json:"supplierMSP"`
+	ProposedOwnerMSP   string            `json:"proposedOwnerMSP"`
+	Status             string            `json:"status"`
+	DRAPApproved       bool              `json:"drapApproved"`
+	DRAPNote           string            `json:"drapNote"`
+	DRAPAt             string            `json:"drapAt"`
+	TransferProposedAt string            `json:"transferProposedAt"`
+	TransferExpiresAt  string            `json:"transferExpiresAt"`
+	Metadata           map[string]string `json:"metadata"`
+	CreatedAt          string            `json:"createdAt"`
+	UpdatedAt          string            `json:"updatedAt"`
 }
 
 // ApiLotSensitive is stored in Private Data Collection
 type ApiLotSensitive struct {
-	DocType       string   `json:"docType"`
-	LotID         string   `json:"lotId"`
-	PriceAmount   *float64 `json:"priceAmount,omitempty"`
-	PriceCurrency string   `json:"priceCurrency,omitempty"`
-	PurityPercent *float64 `json:"purityPercent,omitempty"`
-	Notes         string   `json:"notes,omitempty"`
-	UpdatedAt     string   `json:"updatedAt"`
+	DocType       string `json:"docType"`
+	LotID         string `json:"lotId"`
+	PriceAmount   int64  `json:"priceAmount"`
+	PriceCurrency string `json:"priceCurrency"`
+	PurityPercent int64  `json:"purityPercent"`
+	Notes         string `json:"notes"`
+	UpdatedAt     string `json:"updatedAt"`
+}
+
+// HashStruct for deterministic hashing
+type SensitiveHashStruct struct {
+	LotID         string `json:"lotId"`
+	PriceAmount   int64  `json:"priceAmount"`
+	PriceCurrency string `json:"priceCurrency"`
+	PurityPercent int64  `json:"purityPercent"`
+	Notes         string `json:"notes"`
 }
 
 // ApiTransferContract implements the chaincode
@@ -167,6 +180,59 @@ func (c *ApiTransferContract) checkProposedOwner(ctx contractapi.TransactionCont
 	return nil
 }
 
+/* --------------------------- Validation helpers --------------------------- */
+
+func isValidDate(dateStr string) bool {
+	if strings.TrimSpace(dateStr) == "" {
+		return true
+	}
+	_, err := time.Parse("2006-01-02", strings.TrimSpace(dateStr))
+	return err == nil
+}
+
+func isValidCurrency(currency string) bool {
+	if strings.TrimSpace(currency) == "" {
+		return true
+	}
+	// Basic ISO 4217 validation (3 letters)
+	return len(currency) == 3 && strings.ToUpper(currency) == currency
+}
+
+func (c *ApiTransferContract) validateStatusTransition(oldStatus, newStatus string) error {
+	// UPDATED: Added StatusPendingDRAPApproval transitions
+	allowedTransitions := map[string][]string{
+		StatusPendingDRAPApproval: {StatusInStock, StatusDestroyed}, // DRAP approval moves to IN_STOCK
+		StatusInStock:             {StatusPendingTransfer, StatusConsumed, StatusDestroyed},
+		StatusPendingTransfer:     {StatusAccepted, StatusRejected, StatusInStock},
+		StatusAccepted:            {StatusInStock, StatusConsumed, StatusDestroyed},
+		StatusRejected:            {StatusInStock},
+		StatusConsumed:            {},
+		StatusDestroyed:           {},
+	}
+
+	if validTransitions, exists := allowedTransitions[oldStatus]; exists {
+		for _, valid := range validTransitions {
+			if valid == newStatus {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("invalid status transition from %s to %s", oldStatus, newStatus)
+}
+
+func (c *ApiTransferContract) checkTransferExpiry(lot *ApiLot) error {
+	if lot.TransferExpiresAt != "" {
+		expiry, err := time.Parse(time.RFC3339, lot.TransferExpiresAt)
+		if err != nil {
+			return fmt.Errorf("invalid expiry date format: %w", err)
+		}
+		if time.Now().UTC().After(expiry) {
+			return errors.New("transfer proposal has expired")
+		}
+	}
+	return nil
+}
+
 /* --------------------------- State-based endorsement ---------------------- */
 
 func (c *ApiTransferContract) setSBEForKey(ctx contractapi.TransactionContextInterface, key string, orgMSPs ...string) error {
@@ -203,7 +269,7 @@ func (c *ApiTransferContract) LotExists(ctx contractapi.TransactionContextInterf
 	return len(b) > 0, nil
 }
 
-// CreateLot adds a new lot (owner = creator MSP). DRAP approval required before transfer.
+// CreateLot adds a new lot (owner = creator MSP). Starts as PENDING_DRAP_APPROVAL.
 func (c *ApiTransferContract) CreateLot(
 	ctx contractapi.TransactionContextInterface,
 	lotID, name, batchNumber, quantityStr, unit, manufactureDate, expiryDate, metadataJSON string,
@@ -215,31 +281,51 @@ func (c *ApiTransferContract) CreateLot(
 	if exists {
 		return nil, fmt.Errorf("lot %s already exists", lotID)
 	}
-	qty, err := strconv.ParseFloat(quantityStr, 64)
+
+	// Validate quantity (now in milligrams)
+	qty, err := strconv.ParseInt(quantityStr, 10, 64)
 	if err != nil || qty <= 0 {
-		return nil, fmt.Errorf("invalid quantity %q", quantityStr)
+		return nil, fmt.Errorf("invalid quantity %q (must be positive integer)", quantityStr)
 	}
+
+	// Validate dates
+	if !isValidDate(manufactureDate) {
+		return nil, fmt.Errorf("invalid manufacture date format %q (use YYYY-MM-DD)", manufactureDate)
+	}
+	if !isValidDate(expiryDate) {
+		return nil, fmt.Errorf("invalid expiry date format %q (use YYYY-MM-DD)", expiryDate)
+	}
+
 	msp, err := getMSP(ctx)
 	if err != nil {
 		return nil, err
 	}
+
 	now := nowRFC3339(ctx)
+	// CHANGED: Status starts as PENDING_DRAP_APPROVAL instead of IN_STOCK
 	lot := &ApiLot{
-		DocType:         DocTypeLot,
-		LotID:           lotID,
-		Name:            name,
-		BatchNumber:     batchNumber,
-		Quantity:        qty,
-		Unit:            unit,
-		ManufactureDate: strings.TrimSpace(manufactureDate),
-		ExpiryDate:      strings.TrimSpace(expiryDate),
-		OwnerMSP:        msp,
-		SupplierMSP:     msp,
-		Status:          StatusInStock,
-		DRAPApproved:    false, // <- gate is closed until DRAP approves
-		CreatedAt:       now,
-		UpdatedAt:       now,
+		DocType:            DocTypeLot,
+		LotID:              lotID,
+		Name:               strings.TrimSpace(name),
+		BatchNumber:        strings.TrimSpace(batchNumber),
+		Quantity:           qty,
+		Unit:               strings.TrimSpace(unit),
+		ManufactureDate:    strings.TrimSpace(manufactureDate),
+		ExpiryDate:         strings.TrimSpace(expiryDate),
+		OwnerMSP:           msp,
+		SupplierMSP:        msp,
+		Status:             StatusPendingDRAPApproval, // CHANGED: Requires DRAP approval
+		DRAPApproved:       false,
+		DRAPNote:           "",
+		DRAPAt:             "",
+		ProposedOwnerMSP:   "",
+		TransferProposedAt: "",
+		TransferExpiresAt:  "",
+		Metadata:           make(map[string]string),
+		CreatedAt:          now,
+		UpdatedAt:          now,
 	}
+
 	if strings.TrimSpace(metadataJSON) != "" {
 		md := map[string]string{}
 		if err := json.Unmarshal([]byte(metadataJSON), &md); err != nil {
@@ -247,13 +333,17 @@ func (c *ApiTransferContract) CreateLot(
 		}
 		lot.Metadata = md
 	}
+
 	if err := c.putLot(ctx, lot); err != nil {
 		return nil, err
 	}
+
 	c.emit(ctx, EventLotCreated, lot)
 
 	// SBE: require Supplier (owner) + DRAP to endorse the next state update (approval/rejection)
-	_ = c.setSBEForKey(ctx, lotID, lot.OwnerMSP, MSP_DRAP)
+	if err := c.setSBEForKey(ctx, lotID, lot.OwnerMSP, MSP_DRAP); err != nil {
+		return nil, fmt.Errorf("set initial SBE: %w", err)
+	}
 
 	return lot, nil
 }
@@ -272,6 +362,7 @@ func (c *ApiTransferContract) UpdateMetadata(ctx contractapi.TransactionContextI
 	if err := c.checkOwner(ctx, lot); err != nil {
 		return nil, err
 	}
+
 	md := map[string]string{}
 	if strings.TrimSpace(metadataJSON) != "" {
 		if err := json.Unmarshal([]byte(metadataJSON), &md); err != nil {
@@ -279,35 +370,48 @@ func (c *ApiTransferContract) UpdateMetadata(ctx contractapi.TransactionContextI
 		}
 	}
 	lot.Metadata = md
+
 	if err := c.putLot(ctx, lot); err != nil {
 		return nil, err
 	}
 	return lot, nil
 }
 
-// Consume decreases quantity (owner only). If <=0 -> CONSUMED
+// Consume decreases quantity (owner only). If <=0 -> CONSUMED. Requires DRAP approval.
 func (c *ApiTransferContract) Consume(ctx contractapi.TransactionContextInterface, lotID, amountStr string) (*ApiLot, error) {
 	lot, err := c.readLot(ctx, lotID)
 	if err != nil {
 		return nil, err
 	}
+
+	// NEW: Check if lot is DRAP approved
+	if !lot.DRAPApproved {
+		return nil, errors.New("DRAP approval required before consumption")
+	}
+
 	if lot.Status == StatusPendingTransfer {
 		return nil, errors.New("cannot consume while transfer is pending")
 	}
 	if err := c.checkOwner(ctx, lot); err != nil {
 		return nil, err
 	}
-	amt, err := strconv.ParseFloat(amountStr, 64)
+
+	amt, err := strconv.ParseInt(amountStr, 10, 64)
 	if err != nil || amt <= 0 {
-		return nil, fmt.Errorf("invalid amount %q", amountStr)
+		return nil, fmt.Errorf("invalid amount %q (must be positive integer)", amountStr)
 	}
 	if lot.Quantity < amt {
-		return nil, fmt.Errorf("insufficient quantity: have %.4f, need %.4f", lot.Quantity, amt)
+		return nil, fmt.Errorf("insufficient quantity: have %d, need %d", lot.Quantity, amt)
 	}
+
 	lot.Quantity -= amt
 	if lot.Quantity == 0 {
+		if err := c.validateStatusTransition(lot.Status, StatusConsumed); err != nil {
+			return nil, err
+		}
 		lot.Status = StatusConsumed
 	}
+
 	if err := c.putLot(ctx, lot); err != nil {
 		return nil, err
 	}
@@ -324,6 +428,11 @@ func (c *ApiTransferContract) Destroy(ctx contractapi.TransactionContextInterfac
 	if err := c.checkOwner(ctx, lot); err != nil {
 		return nil, err
 	}
+
+	if err := c.validateStatusTransition(lot.Status, StatusDestroyed); err != nil {
+		return nil, err
+	}
+
 	lot.Quantity = 0
 	lot.Status = StatusDestroyed
 	if err := c.putLot(ctx, lot); err != nil {
@@ -355,7 +464,7 @@ func (c *ApiTransferContract) DeleteLot(ctx contractapi.TransactionContextInterf
 
 /* ------------------------------- DRAP Gate -------------------------------- */
 
-// ApproveLotByDRAP sets drapApproved=true (DRAP only) and resets SBE to owner-only.
+// ApproveLotByDRAP sets drapApproved=true and moves to IN_STOCK (DRAP only)
 func (c *ApiTransferContract) ApproveLotByDRAP(ctx contractapi.TransactionContextInterface, lotID string, note string) (*ApiLot, error) {
 	is, msp, err := isDRAP(ctx)
 	if err != nil {
@@ -368,18 +477,25 @@ func (c *ApiTransferContract) ApproveLotByDRAP(ctx contractapi.TransactionContex
 	if err != nil {
 		return nil, err
 	}
+
+	if lot.Status != StatusPendingDRAPApproval {
+		return nil, fmt.Errorf("lot is not pending DRAP approval (current status: %s)", lot.Status)
+	}
+
 	if lot.DRAPApproved {
 		// idempotent ok
 		return lot, nil
 	}
+
 	lot.DRAPApproved = true
 	lot.DRAPNote = strings.TrimSpace(note)
 	lot.DRAPAt = nowRFC3339(ctx)
+	lot.Status = StatusInStock // Move to IN_STOCK after approval
 
 	if err := c.putLot(ctx, lot); err != nil {
 		return nil, err
 	}
-	// After approval, lock SBE to owner only (or clear to revert to chaincode policy)
+	// After approval, lock SBE to owner only
 	if err := c.setSBEForKey(ctx, lotID, lot.OwnerMSP); err != nil {
 		return nil, fmt.Errorf("reset SBE to owner: %w", err)
 	}
@@ -389,7 +505,7 @@ func (c *ApiTransferContract) ApproveLotByDRAP(ctx contractapi.TransactionContex
 	return lot, nil
 }
 
-// RejectLotByDRAP sets drapApproved=false with note (DRAP only) and resets SBE to owner-only.
+// RejectLotByDRAP sets drapApproved=false with note (DRAP only) - stays in PENDING_DRAP_APPROVAL
 func (c *ApiTransferContract) RejectLotByDRAP(ctx contractapi.TransactionContextInterface, lotID string, reason string) (*ApiLot, error) {
 	is, msp, err := isDRAP(ctx)
 	if err != nil {
@@ -402,16 +518,20 @@ func (c *ApiTransferContract) RejectLotByDRAP(ctx contractapi.TransactionContext
 	if err != nil {
 		return nil, err
 	}
+
+	if lot.Status != StatusPendingDRAPApproval {
+		return nil, fmt.Errorf("lot is not pending DRAP approval (current status: %s)", lot.Status)
+	}
+
 	lot.DRAPApproved = false
 	lot.DRAPNote = strings.TrimSpace(reason)
 	lot.DRAPAt = nowRFC3339(ctx)
+	// Status remains PENDING_DRAP_APPROVAL
 
 	if err := c.putLot(ctx, lot); err != nil {
 		return nil, err
 	}
-	if err := c.setSBEForKey(ctx, lotID, lot.OwnerMSP); err != nil {
-		return nil, fmt.Errorf("reset SBE to owner: %w", err)
-	}
+	// SBE remains with owner + DRAP for potential re-approval
 	c.emit(ctx, EventDRAPRejected, map[string]any{
 		"lotId": lot.LotID, "reason": lot.DRAPNote, "at": lot.DRAPAt,
 	})
@@ -436,12 +556,26 @@ func (c *ApiTransferContract) ProposeTransfer(ctx contractapi.TransactionContext
 	if lot.Quantity <= 0 {
 		return nil, errors.New("cannot transfer zero quantity lot")
 	}
+	// UPDATED: Check for IN_STOCK status (after DRAP approval)
+	if lot.Status != StatusInStock {
+		return nil, fmt.Errorf("lot must be IN_STOCK for transfer (current status: %s)", lot.Status)
+	}
 	if !lot.DRAPApproved {
 		return nil, errors.New("DRAP approval required before transfer")
 	}
 
+	if err := c.validateStatusTransition(lot.Status, StatusPendingTransfer); err != nil {
+		return nil, err
+	}
+
+	now := nowRFC3339(ctx)
+	expiry := time.Now().UTC().Add(time.Hour * TransferExpiryHours).Format(time.RFC3339)
+
 	lot.ProposedOwnerMSP = strings.TrimSpace(proposedOwnerMSP)
 	lot.Status = StatusPendingTransfer
+	lot.TransferProposedAt = now
+	lot.TransferExpiresAt = expiry
+
 	if err := c.putLot(ctx, lot); err != nil {
 		return nil, err
 	}
@@ -466,9 +600,20 @@ func (c *ApiTransferContract) AcceptTransfer(ctx contractapi.TransactionContextI
 	if err := c.checkProposedOwner(ctx, lot); err != nil {
 		return nil, err
 	}
+	if err := c.checkTransferExpiry(lot); err != nil {
+		return nil, err
+	}
+
+	if err := c.validateStatusTransition(lot.Status, StatusAccepted); err != nil {
+		return nil, err
+	}
+
 	lot.OwnerMSP = lot.ProposedOwnerMSP
 	lot.ProposedOwnerMSP = ""
 	lot.Status = StatusAccepted
+	lot.TransferProposedAt = ""
+	lot.TransferExpiresAt = ""
+
 	if err := c.putLot(ctx, lot); err != nil {
 		return nil, err
 	}
@@ -491,8 +636,15 @@ func (c *ApiTransferContract) RejectTransfer(ctx contractapi.TransactionContextI
 	if err := c.checkProposedOwner(ctx, lot); err != nil {
 		return nil, err
 	}
+
+	if err := c.validateStatusTransition(lot.Status, StatusRejected); err != nil {
+		return nil, err
+	}
+
 	lot.ProposedOwnerMSP = ""
 	lot.Status = StatusRejected
+	lot.TransferProposedAt = ""
+	lot.TransferExpiresAt = ""
 	if lot.Metadata == nil {
 		lot.Metadata = map[string]string{}
 	}
@@ -521,8 +673,15 @@ func (c *ApiTransferContract) CancelTransfer(ctx contractapi.TransactionContextI
 	if lot.Status != StatusPendingTransfer {
 		return nil, errors.New("no pending transfer to cancel")
 	}
+
+	if err := c.validateStatusTransition(lot.Status, StatusInStock); err != nil {
+		return nil, err
+	}
+
 	lot.ProposedOwnerMSP = ""
 	lot.Status = StatusInStock
+	lot.TransferProposedAt = ""
+	lot.TransferExpiresAt = ""
 	if lot.Metadata == nil {
 		lot.Metadata = map[string]string{}
 	}
@@ -536,6 +695,40 @@ func (c *ApiTransferContract) CancelTransfer(ctx contractapi.TransactionContextI
 		return nil, fmt.Errorf("reset SBE to owner: %w", err)
 	}
 	c.emit(ctx, EventTransferCancelled, map[string]any{"lotId": lot.LotID, "reason": reason})
+	return lot, nil
+}
+
+// ExpireTransfer checks and expires pending transfers (can be called by anyone)
+func (c *ApiTransferContract) ExpireTransfer(ctx contractapi.TransactionContextInterface, lotID string) (*ApiLot, error) {
+	lot, err := c.readLot(ctx, lotID)
+	if err != nil {
+		return nil, err
+	}
+	if lot.Status != StatusPendingTransfer {
+		return nil, errors.New("no pending transfer")
+	}
+
+	if err := c.checkTransferExpiry(lot); err == nil {
+		return nil, errors.New("transfer has not expired yet")
+	}
+
+	// Transfer has expired
+	lot.ProposedOwnerMSP = ""
+	lot.Status = StatusInStock
+	lot.TransferProposedAt = ""
+	lot.TransferExpiresAt = ""
+	if lot.Metadata == nil {
+		lot.Metadata = map[string]string{}
+	}
+	lot.Metadata["expiredAt"] = nowRFC3339(ctx)
+
+	if err := c.putLot(ctx, lot); err != nil {
+		return nil, err
+	}
+	if err := c.setSBEForKey(ctx, lotID, lot.OwnerMSP); err != nil {
+		return nil, fmt.Errorf("reset SBE to owner: %w", err)
+	}
+	c.emit(ctx, EventTransferExpired, map[string]any{"lotId": lot.LotID})
 	return lot, nil
 }
 
@@ -559,25 +752,31 @@ func (c *ApiTransferContract) PutSensitive(
 	if err := c.checkOwner(ctx, lot); err != nil {
 		return err
 	}
-	var priceAmount *float64
-	var purityPercent *float64
+
+	// Validate currency
+	if !isValidCurrency(priceCurrency) {
+		return fmt.Errorf("invalid currency code %q (must be 3-letter ISO code)", priceCurrency)
+	}
+
+	var priceAmount int64 = -1   // Use -1 to represent "not set"
+	var purityPercent int64 = -1 // Use -1 to represent "not set"
 
 	hasPrice := strings.EqualFold(strings.TrimSpace(hasPriceStr), "true")
 	hasPurity := strings.EqualFold(strings.TrimSpace(hasPurityStr), "true")
 
 	if hasPrice {
-		val, err := strconv.ParseFloat(priceAmountStr, 64)
-		if err != nil {
-			return fmt.Errorf("invalid priceAmount %q: %w", priceAmountStr, err)
+		val, err := strconv.ParseInt(priceAmountStr, 10, 64)
+		if err != nil || val < 0 {
+			return fmt.Errorf("invalid priceAmount %q (must be non-negative integer)", priceAmountStr)
 		}
-		priceAmount = &val
+		priceAmount = val
 	}
 	if hasPurity {
-		val, err := strconv.ParseFloat(purityPercentStr, 64)
-		if err != nil {
-			return fmt.Errorf("invalid purityPercent %q: %w", purityPercentStr, err)
+		val, err := strconv.ParseInt(purityPercentStr, 10, 64)
+		if err != nil || val < 0 || val > 10000 {
+			return fmt.Errorf("invalid purityPercent %q (must be 0-10000 basis points)", purityPercentStr)
 		}
-		purityPercent = &val
+		purityPercent = val
 	}
 
 	rec := &ApiLotSensitive{
@@ -645,23 +844,21 @@ func (c *ApiTransferContract) LinkSensitiveHash(ctx contractapi.TransactionConte
 	if err := json.Unmarshal(b, &rec); err != nil {
 		return nil, fmt.Errorf("unmarshal private data: %w", err)
 	}
-	// Deterministic string for hashing
-	var fields []string
-	fields = append(fields, fmt.Sprintf("lotId=%s", rec.LotID))
-	if rec.PriceAmount != nil {
-		fields = append(fields, fmt.Sprintf("priceAmount=%.8f", *rec.PriceAmount))
+
+	// Use deterministic JSON marshaling for hashing
+	hashStruct := SensitiveHashStruct{
+		LotID:         rec.LotID,
+		PriceAmount:   rec.PriceAmount,
+		PriceCurrency: rec.PriceCurrency,
+		PurityPercent: rec.PurityPercent,
+		Notes:         rec.Notes,
 	}
-	if rec.PriceCurrency != "" {
-		fields = append(fields, fmt.Sprintf("priceCurrency=%s", rec.PriceCurrency))
+	hashBytes, err := json.Marshal(hashStruct)
+	if err != nil {
+		return nil, fmt.Errorf("marshal hash struct: %w", err)
 	}
-	if rec.PurityPercent != nil {
-		fields = append(fields, fmt.Sprintf("purityPercent=%.6f", *rec.PurityPercent))
-	}
-	if rec.Notes != "" {
-		fields = append(fields, fmt.Sprintf("notes=%s", rec.Notes))
-	}
-	concat := strings.Join(fields, "|")
-	h := sha256.Sum256([]byte(concat))
+
+	h := sha256.Sum256(hashBytes)
 	hashHex := hex.EncodeToString(h[:])
 
 	if lot.Metadata == nil {
@@ -704,6 +901,18 @@ func (c *ApiTransferContract) GetLotsByOwner(ctx contractapi.TransactionContextI
 		"selector": map[string]any{
 			"docType":  DocTypeLot,
 			"ownerMSP": ownerMSP,
+		},
+	}
+	qb, _ := json.Marshal(selector)
+	return c.queryLotsInternal(ctx, string(qb))
+}
+
+// GetLotsPendingDRAPApproval - NEW: Get all lots waiting for DRAP approval
+func (c *ApiTransferContract) GetLotsPendingDRAPApproval(ctx contractapi.TransactionContextInterface) ([]*ApiLot, error) {
+	selector := map[string]any{
+		"selector": map[string]any{
+			"docType": DocTypeLot,
+			"status":  StatusPendingDRAPApproval,
 		},
 	}
 	qb, _ := json.Marshal(selector)
