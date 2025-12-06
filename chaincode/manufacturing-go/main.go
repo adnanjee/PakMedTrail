@@ -824,6 +824,183 @@ func (c *ManufacturingContract) QueryBatchesPaged(
 	return queryBatchesPaged(ctx, selectorJSON, int32(pageSize), bookmark)
 }
 
+// ============ NEW MISSING FUNCTIONS ADDED BELOW ============
+
+// ValidateStatusTransition validates state transitions (MISSING FUNCTION)
+func (c *ManufacturingContract) validateStatusTransition(oldStatus, newStatus string) error {
+	allowedTransitions := map[string][]string{
+		statusStock:           {StatusPendingTransfer, StatusDestroyed},
+		StatusPendingTransfer: {StatusAccepted, StatusRejected, statusStock, StatusExpired},
+		StatusAccepted:        {StatusDestroyed},
+		StatusRejected:        {statusStock},
+		StatusExpired:         {statusStock},
+		StatusDestroyed:       {},
+	}
+
+	if validTransitions, exists := allowedTransitions[oldStatus]; exists {
+		for _, valid := range validTransitions {
+			if valid == newStatus {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("invalid status transition from %s to %s", oldStatus, newStatus)
+}
+
+// ResetBatchToStock resets REJECTED or EXPIRED batches back to IN_STOCK (MISSING FUNCTION)
+func (c *ManufacturingContract) ResetBatchToStock(ctx contractapi.TransactionContextInterface, batchID string) (*DrugBatch, error) {
+	b, err := c.readBatch(ctx, batchID)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.checkCurrentOwner(ctx, b); err != nil {
+		return nil, err
+	}
+
+	// Only allow reset from REJECTED or EXPIRED status
+	if b.Status != StatusRejected && b.Status != StatusExpired {
+		return nil, fmt.Errorf("can only reset from REJECTED or EXPIRED status (current: %s)", b.Status)
+	}
+
+	if err := c.validateStatusTransition(b.Status, statusStock); err != nil {
+		return nil, err
+	}
+
+	b.Status = statusStock
+	if err := c.putBatch(ctx, b); err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+// UpdateBatchMetadata updates batch metadata (owner only) (MISSING FUNCTION)
+func (c *ManufacturingContract) UpdateBatchMetadata(ctx contractapi.TransactionContextInterface, batchID, metadataJSON string) (*DrugBatch, error) {
+	b, err := c.readBatch(ctx, batchID)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.checkCurrentOwner(ctx, b); err != nil {
+		return nil, err
+	}
+
+	md := make(map[string]string)
+	if strings.TrimSpace(metadataJSON) != "" {
+		if err := json.Unmarshal([]byte(metadataJSON), &md); err != nil {
+			return nil, fmt.Errorf("invalid metadata JSON: %w", err)
+		}
+	}
+	b.Metadata = md
+
+	if err := c.putBatch(ctx, b); err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+// GetBatchesByStatus returns batches filtered by status (MISSING FUNCTION)
+func (c *ManufacturingContract) GetBatchesByStatus(ctx contractapi.TransactionContextInterface, status string) ([]*DrugBatch, error) {
+	selector := map[string]any{
+		"selector": map[string]any{
+			"docType": DocTypeBatch,
+			"status":  status,
+		},
+	}
+	qb, _ := json.Marshal(selector)
+	return queryBatches(ctx, string(qb))
+}
+
+// BatchExists checks if a batch exists (MISSING FUNCTION)
+func (c *ManufacturingContract) BatchExists(ctx contractapi.TransactionContextInterface, batchID string) (bool, error) {
+	return c.keyExists(ctx, "BATCH_"+batchID)
+}
+
+// GetAllFormulations returns all formulations (MISSING FUNCTION)
+func (c *ManufacturingContract) GetAllFormulations(ctx contractapi.TransactionContextInterface) ([]*DrugFormulation, error) {
+	selector := map[string]any{
+		"selector": map[string]any{
+			"docType": DocTypeFormulation,
+		},
+	}
+	qb, _ := json.Marshal(selector)
+	
+	iter, err := ctx.GetStub().GetQueryResult(string(qb))
+	if err != nil {
+		return nil, fmt.Errorf("query formulations: %w", err)
+	}
+	defer iter.Close()
+
+	var formulations []*DrugFormulation
+	for iter.HasNext() {
+		kv, err := iter.Next()
+		if err != nil {
+			return nil, err
+		}
+		var f DrugFormulation
+		if err := json.Unmarshal(kv.Value, &f); err == nil && f.DocType == DocTypeFormulation {
+			formulations = append(formulations, &f)
+		}
+	}
+	return formulations, nil
+}
+
+// GetBatchesPendingDRAPApproval returns batches waiting for DRAP approval (MISSING FUNCTION)
+func (c *ManufacturingContract) GetBatchesPendingDRAPApproval(ctx contractapi.TransactionContextInterface) ([]*DrugBatch, error) {
+	selector := map[string]any{
+		"selector": map[string]any{
+			"docType":     DocTypeBatch,
+			"drapApproved": false,
+			"status":      statusStock, // Only batches in stock that need approval
+		},
+	}
+	qb, _ := json.Marshal(selector)
+	return queryBatches(ctx, string(qb))
+}
+
+// GetBatchesPendingTransfer returns batches with pending transfers (MISSING FUNCTION)
+func (c *ManufacturingContract) GetBatchesPendingTransfer(ctx contractapi.TransactionContextInterface) ([]*DrugBatch, error) {
+	selector := map[string]any{
+		"selector": map[string]any{
+			"docType": DocTypeBatch,
+			"status":  StatusPendingTransfer,
+		},
+	}
+	qb, _ := json.Marshal(selector)
+	return queryBatches(ctx, string(qb))
+}
+
+// GetBatchHistory returns the transaction history for a batch (MISSING FUNCTION)
+func (c *ManufacturingContract) GetBatchHistory(ctx contractapi.TransactionContextInterface, batchID string) ([]map[string]any, error) {
+	iter, err := ctx.GetStub().GetHistoryForKey("BATCH_" + batchID)
+	if err != nil {
+		return nil, fmt.Errorf("get history for batch %s: %w", batchID, err)
+	}
+	defer iter.Close()
+
+	var history []map[string]any
+	for iter.HasNext() {
+		tx, err := iter.Next()
+		if err != nil {
+			return nil, err
+		}
+		entry := map[string]any{
+			"txId":      tx.TxId,
+			"isDelete":  tx.IsDelete,
+			"timestamp": "",
+		}
+		if tx.Timestamp != nil {
+			entry["timestamp"] = time.Unix(tx.Timestamp.Seconds, int64(tx.Timestamp.Nanos)).UTC().Format(time.RFC3339)
+		}
+		if !tx.IsDelete && len(tx.Value) > 0 {
+			var batch DrugBatch
+			if err := json.Unmarshal(tx.Value, &batch); err == nil {
+				entry["value"] = batch
+			}
+		}
+		history = append(history, entry)
+	}
+	return history, nil
+}
+
 // ---------------- Private helpers (state) ----------------
 
 func (c *ManufacturingContract) keyExists(ctx contractapi.TransactionContextInterface, key string) (bool, error) {
@@ -939,9 +1116,9 @@ func queryBatchesPaged(ctx contractapi.TransactionContextInterface, selectorJSON
 func main() {
 	cc, err := contractapi.NewChaincode(new(ManufacturingContract))
 	if err != nil {
-		panic(fmt.Errorf("create chaincode: %w", err))
+		panic(fmt.Errorf("create chaincode: %w", err)
 	}
 	if err := cc.Start(); err != nil {
-		panic(fmt.Errorf("start chaincode: %w", err))
+		panic(fmt.Errorf("start chaincode: %w", err)
 	}
 }

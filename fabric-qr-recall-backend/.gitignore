@@ -1,0 +1,6 @@
+
+node_modules/
+.env
+wallet/
+connection-org1.json
+npm-debug.log*

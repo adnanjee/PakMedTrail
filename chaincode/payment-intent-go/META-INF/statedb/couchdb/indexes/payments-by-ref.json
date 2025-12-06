@@ -1,0 +1,6 @@
+{
+  "index": { "fields": ["docType", "refType", "refId", "createdAt"] },
+  "ddoc": "indexPaymentsByRef",
+  "name": "indexPaymentsByRef",
+  "type": "json"
+}

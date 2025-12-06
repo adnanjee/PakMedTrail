@@ -274,6 +274,20 @@ func (c *ApiTransferContract) CreateLot(
 	ctx contractapi.TransactionContextInterface,
 	lotID, name, batchNumber, quantityStr, unit, manufactureDate, expiryDate, metadataJSON string,
 ) (*ApiLot, error) {
+	// FIX: Added input validation for required fields
+	if strings.TrimSpace(lotID) == "" {
+		return nil, errors.New("lotID cannot be empty")
+	}
+	if strings.TrimSpace(name) == "" {
+		return nil, errors.New("name cannot be empty")
+	}
+	if strings.TrimSpace(batchNumber) == "" {
+		return nil, errors.New("batchNumber cannot be empty")
+	}
+	if strings.TrimSpace(unit) == "" {
+		return nil, errors.New("unit cannot be empty")
+	}
+
 	exists, err := c.LotExists(ctx, lotID)
 	if err != nil {
 		return nil, err
@@ -425,6 +439,12 @@ func (c *ApiTransferContract) Destroy(ctx contractapi.TransactionContextInterfac
 	if err != nil {
 		return nil, err
 	}
+
+	// FIX: Added check for pending transfer
+	if lot.Status == StatusPendingTransfer {
+		return nil, errors.New("cannot destroy while transfer is pending")
+	}
+
 	if err := c.checkOwner(ctx, lot); err != nil {
 		return nil, err
 	}
@@ -458,7 +478,12 @@ func (c *ApiTransferContract) DeleteLot(ctx contractapi.TransactionContextInterf
 		return fmt.Errorf("delete lot %s: %w", lotID, err)
 	}
 	c.emit(ctx, EventLotDeleted, map[string]any{"lotId": lotID})
-	_ = c.clearSBE(ctx, lotID)
+
+	// FIX: Log SBE clearance error but don't fail the operation
+	if err := c.clearSBE(ctx, lotID); err != nil {
+		// Log but don't fail - the state is already deleted
+		fmt.Printf("Warning: failed to clear SBE for deleted lot %s: %v\n", lotID, err)
+	}
 	return nil
 }
 
@@ -604,13 +629,14 @@ func (c *ApiTransferContract) AcceptTransfer(ctx contractapi.TransactionContextI
 		return nil, err
 	}
 
-	if err := c.validateStatusTransition(lot.Status, StatusAccepted); err != nil {
+	// FIX: Change status to IN_STOCK instead of ACCEPTED
+	if err := c.validateStatusTransition(lot.Status, StatusInStock); err != nil {
 		return nil, err
 	}
 
 	lot.OwnerMSP = lot.ProposedOwnerMSP
 	lot.ProposedOwnerMSP = ""
-	lot.Status = StatusAccepted
+	lot.Status = StatusInStock // FIX: Move to IN_STOCK, not ACCEPTED
 	lot.TransferProposedAt = ""
 	lot.TransferExpiresAt = ""
 
@@ -708,28 +734,30 @@ func (c *ApiTransferContract) ExpireTransfer(ctx contractapi.TransactionContextI
 		return nil, errors.New("no pending transfer")
 	}
 
-	if err := c.checkTransferExpiry(lot); err == nil {
-		return nil, errors.New("transfer has not expired yet")
+	// FIX: Inverted logic - proceed when transfer HAS expired
+	if err := c.checkTransferExpiry(lot); err != nil {
+		// Transfer has expired - proceed with expiration
+		lot.ProposedOwnerMSP = ""
+		lot.Status = StatusInStock
+		lot.TransferProposedAt = ""
+		lot.TransferExpiresAt = ""
+		if lot.Metadata == nil {
+			lot.Metadata = map[string]string{}
+		}
+		lot.Metadata["expiredAt"] = nowRFC3339(ctx)
+
+		if err := c.putLot(ctx, lot); err != nil {
+			return nil, err
+		}
+		if err := c.setSBEForKey(ctx, lotID, lot.OwnerMSP); err != nil {
+			return nil, fmt.Errorf("reset SBE to owner: %w", err)
+		}
+		c.emit(ctx, EventTransferExpired, map[string]any{"lotId": lot.LotID})
+		return lot, nil
 	}
 
-	// Transfer has expired
-	lot.ProposedOwnerMSP = ""
-	lot.Status = StatusInStock
-	lot.TransferProposedAt = ""
-	lot.TransferExpiresAt = ""
-	if lot.Metadata == nil {
-		lot.Metadata = map[string]string{}
-	}
-	lot.Metadata["expiredAt"] = nowRFC3339(ctx)
-
-	if err := c.putLot(ctx, lot); err != nil {
-		return nil, err
-	}
-	if err := c.setSBEForKey(ctx, lotID, lot.OwnerMSP); err != nil {
-		return nil, fmt.Errorf("reset SBE to owner: %w", err)
-	}
-	c.emit(ctx, EventTransferExpired, map[string]any{"lotId": lot.LotID})
-	return lot, nil
+	// If no error from checkTransferExpiry, transfer hasn't expired yet
+	return nil, errors.New("transfer has not expired yet")
 }
 
 /* ------------------------------- PDC methods ------------------------------ */

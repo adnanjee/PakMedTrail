@@ -251,22 +251,32 @@ func (c *RetailContract) setSBE(ctx contractapi.TransactionContextInterface, key
 
 // ---------------- CC2CC helpers (manufacturing) ----------------
 
+// CORRECTED: Fixed mfgBatch struct to match manufacturing chaincode
 type mfgBatch struct {
-	DocType      string  `json:"docType"`
-	BatchID      string  `json:"batchId"`
-	DrugCode     string  `json:"drugCode"`
-	Quantity     float64 `json:"quantity"`
-	Unit         string  `json:"unit"`
-	ProducerMSP  string  `json:"producerMSP"` // current owner in your manufacturing CC
-	Status       string  `json:"status"`
-	DRAPApproved bool    `json:"drapApproved"`
+	DocType         string  `json:"docType"`
+	BatchID         string  `json:"batchId"`
+	DrugCode        string  `json:"drugCode"`
+	Quantity        float64 `json:"quantity"`
+	Unit            string  `json:"unit"`
+	ProducerMSP     string  `json:"producerMSP"`     // NEVER CHANGES
+	CurrentOwnerMSP string  `json:"currentOwnerMSP"` // CHANGES - current owner (CRITICAL FIX)
+	Status          string  `json:"status"`
+	DRAPApproved    bool    `json:"drapApproved"`
+	ProposedOwnerMSP string `json:"proposedOwnerMSP,omitempty"`
 }
 
 func mfgReadBatch(ctx contractapi.TransactionContextInterface, batchID string) (*mfgBatch, error) {
 	args := [][]byte{[]byte("ReadBatch"), []byte(batchID)}
 	resp := ctx.GetStub().InvokeChaincode(mfgCCName, args, mfgChannel)
 	if resp.Status != 200 {
-		return nil, fmt.Errorf("manufacturing.ReadBatch(%s) failed: %s", batchID, string(resp.Payload))
+		// IMPROVED: Better error handling
+		var errorMsg string
+		if len(resp.Payload) > 0 {
+			errorMsg = string(resp.Payload)
+		} else {
+			errorMsg = "no error details provided"
+		}
+		return nil, fmt.Errorf("manufacturing.ReadBatch(%s) failed: %s (status: %d)", batchID, errorMsg, resp.Status)
 	}
 	var b mfgBatch
 	if err := json.Unmarshal(resp.Payload, &b); err != nil {
@@ -279,7 +289,13 @@ func mfgProposeTransfer(ctx contractapi.TransactionContextInterface, batchID, to
 	args := [][]byte{[]byte("ProposeBatchTransfer"), []byte(batchID), []byte(toMSP)}
 	resp := ctx.GetStub().InvokeChaincode(mfgCCName, args, mfgChannel)
 	if resp.Status != 200 {
-		return fmt.Errorf("manufacturing.ProposeBatchTransfer failed: %s", string(resp.Payload))
+		var errorMsg string
+		if len(resp.Payload) > 0 {
+			errorMsg = string(resp.Payload)
+		} else {
+			errorMsg = "no error details provided"
+		}
+		return fmt.Errorf("manufacturing.ProposeBatchTransfer failed: %s (status: %d)", errorMsg, resp.Status)
 	}
 	return nil
 }
@@ -288,7 +304,13 @@ func mfgAcceptTransfer(ctx contractapi.TransactionContextInterface, batchID stri
 	args := [][]byte{[]byte("AcceptBatchTransfer"), []byte(batchID)}
 	resp := ctx.GetStub().InvokeChaincode(mfgCCName, args, mfgChannel)
 	if resp.Status != 200 {
-		return fmt.Errorf("manufacturing.AcceptBatchTransfer failed: %s", string(resp.Payload))
+		var errorMsg string
+		if len(resp.Payload) > 0 {
+			errorMsg = string(resp.Payload)
+		} else {
+			errorMsg = "no error details provided"
+		}
+		return fmt.Errorf("manufacturing.AcceptBatchTransfer failed: %s (status: %d)", errorMsg, resp.Status)
 	}
 	return nil
 }
@@ -297,7 +319,13 @@ func mfgRejectTransfer(ctx contractapi.TransactionContextInterface, batchID, rea
 	args := [][]byte{[]byte("RejectBatchTransfer"), []byte(batchID), []byte(reason)}
 	resp := ctx.GetStub().InvokeChaincode(mfgCCName, args, mfgChannel)
 	if resp.Status != 200 {
-		return fmt.Errorf("manufacturing.RejectBatchTransfer failed: %s", string(resp.Payload))
+		var errorMsg string
+		if len(resp.Payload) > 0 {
+			errorMsg = string(resp.Payload)
+		} else {
+			errorMsg = "no error details provided"
+		}
+		return fmt.Errorf("manufacturing.RejectBatchTransfer failed: %s (status: %d)", errorMsg, resp.Status)
 	}
 	return nil
 }
@@ -306,9 +334,37 @@ func mfgCancelTransfer(ctx contractapi.TransactionContextInterface, batchID, rea
 	args := [][]byte{[]byte("CancelBatchTransfer"), []byte(batchID), []byte(reason)}
 	resp := ctx.GetStub().InvokeChaincode(mfgCCName, args, mfgChannel)
 	if resp.Status != 200 {
-		return fmt.Errorf("manufacturing.CancelBatchTransfer failed: %s", string(resp.Payload))
+		var errorMsg string
+		if len(resp.Payload) > 0 {
+			errorMsg = string(resp.Payload)
+		} else {
+			errorMsg = "no error details provided"
+		}
+		return fmt.Errorf("manufacturing.CancelBatchTransfer failed: %s (status: %d)", errorMsg, resp.Status)
 	}
 	return nil
+}
+
+// ---------------- Status Validation (NEW FUNCTION) ----------------
+
+func (c *RetailContract) validateShipmentStatusTransition(oldStatus, newStatus string) error {
+	allowedTransitions := map[string][]string{
+		ShipPending:     {ShipAccepted, ShipRejected, ShipCancelled},
+		ShipAccepted:    {ShipDelivered, ShipQuarantined},
+		ShipDelivered:   {ShipQuarantined},
+		ShipRejected:    {},
+		ShipCancelled:   {},
+		ShipQuarantined: {},
+	}
+
+	if validTransitions, exists := allowedTransitions[oldStatus]; exists {
+		for _, valid := range validTransitions {
+			if valid == newStatus {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("invalid shipment status transition from %s to %s", oldStatus, newStatus)
 }
 
 // ---------------- Shipments: Create/Accept/Reject/Cancel/Delivered ----------------
@@ -348,9 +404,9 @@ func (c *RetailContract) CreateRetailShipmentOffer(
 		return nil, errors.New("batch is not DRAP-approved")
 	}
 	callerMSP, _ := getMSP(ctx)
-	// Distributor must be current owner at the manufacturing CC (ProducerMSP field holds current owner in your modeling)
-	if b.ProducerMSP != callerMSP {
-		return nil, fmt.Errorf("caller MSP %s is not current owner %s of batch %s", callerMSP, b.ProducerMSP, batchID)
+	// CRITICAL FIX: Use CurrentOwnerMSP instead of ProducerMSP
+	if b.CurrentOwnerMSP != callerMSP {
+		return nil, fmt.Errorf("caller MSP %s is not current owner %s of batch %s", callerMSP, b.CurrentOwnerMSP, batchID)
 	}
 
 	qty, err := strconv.ParseFloat(strings.TrimSpace(quantityStr), 64)
@@ -407,6 +463,12 @@ func (c *RetailContract) AcceptRetailShipment(ctx contractapi.TransactionContext
 	if s.Status != ShipPending {
 		return nil, errors.New("shipment not in PENDING state")
 	}
+	
+	// Validate status transition
+	if err := c.validateShipmentStatusTransition(s.Status, ShipAccepted); err != nil {
+		return nil, err
+	}
+	
 	if err := mfgAcceptTransfer(ctx, s.BatchID); err != nil {
 		return nil, err
 	}
@@ -433,6 +495,12 @@ func (c *RetailContract) RejectRetailShipment(ctx contractapi.TransactionContext
 	if s.Status != ShipPending {
 		return nil, errors.New("shipment not in PENDING state")
 	}
+	
+	// Validate status transition
+	if err := c.validateShipmentStatusTransition(s.Status, ShipRejected); err != nil {
+		return nil, err
+	}
+	
 	if err := mfgRejectTransfer(ctx, s.BatchID, strings.TrimSpace(reason)); err != nil {
 		return nil, err
 	}
@@ -464,6 +532,12 @@ func (c *RetailContract) CancelRetailShipment(ctx contractapi.TransactionContext
 	if s.Status != ShipPending {
 		return nil, errors.New("shipment not in PENDING state")
 	}
+	
+	// Validate status transition
+	if err := c.validateShipmentStatusTransition(s.Status, ShipCancelled); err != nil {
+		return nil, err
+	}
+	
 	if err := mfgCancelTransfer(ctx, s.BatchID, strings.TrimSpace(reason)); err != nil {
 		return nil, err
 	}
@@ -495,6 +569,12 @@ func (c *RetailContract) MarkRetailDelivered(ctx contractapi.TransactionContextI
 	if s.Status != ShipAccepted {
 		return nil, errors.New("shipment must be ACCEPTED before delivery")
 	}
+	
+	// Validate status transition
+	if err := c.validateShipmentStatusTransition(s.Status, ShipDelivered); err != nil {
+		return nil, err
+	}
+	
 	s.Status = ShipDelivered
 	if err := c.putShipment(ctx, s); err != nil {
 		return nil, err
@@ -683,6 +763,12 @@ func (c *RetailContract) QuarantineByRecall(ctx contractapi.TransactionContextIn
 	if !active {
 		return nil, errors.New("no ACTIVE recall for this batch")
 	}
+	
+	// Validate status transition
+	if err := c.validateShipmentStatusTransition(s.Status, ShipQuarantined); err != nil {
+		return nil, err
+	}
+	
 	s.Status = ShipQuarantined
 	if err := c.putShipment(ctx, s); err != nil {
 		return nil, err
@@ -724,9 +810,9 @@ func (c *RetailContract) VerifyDispense(
 		return nil, err
 	}
 	callerMSP, _ := getMSP(ctx)
-	// Retail must be current owner of batch to dispense
-	if b.ProducerMSP != callerMSP {
-		return nil, fmt.Errorf("caller MSP %s is not current owner %s of batch %s", callerMSP, b.ProducerMSP, batchID)
+	// CRITICAL FIX: Use CurrentOwnerMSP instead of ProducerMSP
+	if b.CurrentOwnerMSP != callerMSP {
+		return nil, fmt.Errorf("caller MSP %s is not current owner %s of batch %s", callerMSP, b.CurrentOwnerMSP, batchID)
 	}
 	// Must not be under active recall
 	activeRecall, err := c.findActiveRecallForBatch(ctx, batchID)
@@ -764,6 +850,96 @@ func (c *RetailContract) VerifyDispense(
 	}
 	emit(ctx, EvtDispenseVerified, rec)
 	return rec, nil
+}
+
+// ---------------- NEW MISSING FUNCTIONS ADDED BELOW ----------------
+
+// UpdateShipmentMetadata updates shipment metadata (NEW FUNCTION)
+func (c *RetailContract) UpdateShipmentMetadata(ctx contractapi.TransactionContextInterface, shipmentID, metadataJSON string) (*Shipment, error) {
+	s, err := c.readShipment(ctx, shipmentID)
+	if err != nil {
+		return nil, err
+	}
+	
+	callerMSP, _ := getMSP(ctx)
+	if callerMSP != s.FromMSP && callerMSP != s.ToMSP {
+		return nil, fmt.Errorf("only %s or %s can update shipment", s.FromMSP, s.ToMSP)
+	}
+
+	md := make(map[string]string)
+	if strings.TrimSpace(metadataJSON) != "" {
+		if err := json.Unmarshal([]byte(metadataJSON), &md); err != nil {
+			return nil, fmt.Errorf("invalid metadata JSON: %w", err)
+		}
+	}
+	s.Metadata = md
+
+	if err := c.putShipment(ctx, s); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// GetShipmentsByStatus returns shipments filtered by status (NEW FUNCTION)
+func (c *RetailContract) GetShipmentsByStatus(ctx contractapi.TransactionContextInterface, status string) ([]*Shipment, error) {
+	selector := map[string]any{
+		"selector": map[string]any{
+			"docType": DocTypeShipment,
+			"status":  status,
+		},
+	}
+	qb, _ := json.Marshal(selector)
+	return queryShipments(ctx, string(qb))
+}
+
+// GetActiveRecalls returns all active recalls (NEW FUNCTION)
+func (c *RetailContract) GetActiveRecalls(ctx contractapi.TransactionContextInterface) ([]*RecallNotice, error) {
+	selector := map[string]any{
+		"selector": map[string]any{
+			"docType": DocTypeRecall,
+			"status":  RecallActive,
+		},
+	}
+	qb, _ := json.Marshal(selector)
+	return c.QueryRecalls(ctx, string(qb))
+}
+
+// ShipmentExists checks if a shipment exists (NEW FUNCTION)
+func (c *RetailContract) ShipmentExists(ctx contractapi.TransactionContextInterface, shipmentID string) (bool, error) {
+	return c.keyExists(ctx, "RSHIP_"+shipmentID)
+}
+
+// GetShipmentHistory returns the transaction history for a shipment (NEW FUNCTION)
+func (c *RetailContract) GetShipmentHistory(ctx contractapi.TransactionContextInterface, shipmentID string) ([]map[string]any, error) {
+	iter, err := ctx.GetStub().GetHistoryForKey("RSHIP_" + shipmentID)
+	if err != nil {
+		return nil, fmt.Errorf("get history for shipment %s: %w", shipmentID, err)
+	}
+	defer iter.Close()
+
+	var history []map[string]any
+	for iter.HasNext() {
+		tx, err := iter.Next()
+		if err != nil {
+			return nil, err
+		}
+		entry := map[string]any{
+			"txId":      tx.TxId,
+			"isDelete":  tx.IsDelete,
+			"timestamp": "",
+		}
+		if tx.Timestamp != nil {
+			entry["timestamp"] = time.Unix(tx.Timestamp.Seconds, int64(tx.Timestamp.Nanos)).UTC().Format(time.RFC3339)
+		}
+		if !tx.IsDelete && len(tx.Value) > 0 {
+			var shipment Shipment
+			if err := json.Unmarshal(tx.Value, &shipment); err == nil {
+				entry["value"] = shipment
+			}
+		}
+		history = append(history, entry)
+	}
+	return history, nil
 }
 
 // ---------------- Query APIs ----------------
@@ -967,10 +1143,10 @@ func queryShipmentsPaged(ctx contractapi.TransactionContextInterface, selectorJS
 func main() {
 	cc, err := contractapi.NewChaincode(new(RetailContract))
 	if err != nil {
-		panic(fmt.Errorf("create chaincode: %w", err))
+		panic(fmt.Errorf("create chaincode: %w", err)
 	}
 	if err := cc.Start(); err != nil {
-		panic(fmt.Errorf("start chaincode: %w", err))
+		panic(fmt.Errorf("start chaincode: %w", err)
 	}
 }
 
