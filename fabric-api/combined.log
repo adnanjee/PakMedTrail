@@ -1,6 +1,0 @@
-{"level":"info","message":"Server running on port 3000","timestamp":"2025-10-27T06:03:43.018Z"}
-{"ip":"::1","level":"info","message":"GET /health","timestamp":"2025-10-27T06:03:55.329Z","userAgent":"curl/8.5.0"}
-{"level":"info","message":"Wallet initialized successfully","timestamp":"2025-10-27T06:03:55.332Z"}
-{"ip":"::1","level":"info","message":"GET /identities","timestamp":"2025-10-27T06:06:24.741Z","userAgent":"curl/8.5.0"}
-{"ip":"::1","level":"info","message":"GET /identities","timestamp":"2025-10-27T06:07:01.014Z","userAgent":"curl/8.5.0"}
-{"ip":"::1","level":"info","message":"GET /identities","timestamp":"2025-10-27T06:07:09.509Z","userAgent":"curl/8.5.0"}
