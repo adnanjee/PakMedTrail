@@ -922,7 +922,7 @@ func (c *ManufacturingContract) GetAllFormulations(ctx contractapi.TransactionCo
 		},
 	}
 	qb, _ := json.Marshal(selector)
-	
+
 	iter, err := ctx.GetStub().GetQueryResult(string(qb))
 	if err != nil {
 		return nil, fmt.Errorf("query formulations: %w", err)
@@ -947,9 +947,9 @@ func (c *ManufacturingContract) GetAllFormulations(ctx contractapi.TransactionCo
 func (c *ManufacturingContract) GetBatchesPendingDRAPApproval(ctx contractapi.TransactionContextInterface) ([]*DrugBatch, error) {
 	selector := map[string]any{
 		"selector": map[string]any{
-			"docType":     DocTypeBatch,
+			"docType":      DocTypeBatch,
 			"drapApproved": false,
-			"status":      statusStock, // Only batches in stock that need approval
+			"status":       statusStock, // Only batches in stock that need approval
 		},
 	}
 	qb, _ := json.Marshal(selector)
@@ -1116,9 +1116,9 @@ func queryBatchesPaged(ctx contractapi.TransactionContextInterface, selectorJSON
 func main() {
 	cc, err := contractapi.NewChaincode(new(ManufacturingContract))
 	if err != nil {
-		panic(fmt.Errorf("create chaincode: %w", err)
+		panic(fmt.Errorf("create chaincode: %w", err))
 	}
 	if err := cc.Start(); err != nil {
-		panic(fmt.Errorf("start chaincode: %w", err)
+		panic(fmt.Errorf("start chaincode: %w", err))
 	}
 }

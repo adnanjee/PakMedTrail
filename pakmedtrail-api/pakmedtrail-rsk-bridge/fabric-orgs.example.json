@@ -1,0 +1,16 @@
+{
+  "SupplierMSP": {
+    "peerEndpoint": "192.168.100.20:7051",
+    "peerHostAlias": "peer0.supplier.pakmedtrail.local",
+    "tlsRootCertPath": "/path/to/supplier/tls/ca.crt",
+    "certPath": "/path/to/supplier/users/admin/msp/signcerts/cert.pem",
+    "keyPath": "/path/to/supplier/users/admin/msp/keystore/key.pem"
+  },
+  "ManufacturerMSP": {
+    "peerEndpoint": "192.168.100.21:7051",
+    "peerHostAlias": "peer0.manufacturer.pakmedtrail.local",
+    "tlsRootCertPath": "/path/to/manufacturer/tls/ca.crt",
+    "certPath": "/path/to/manufacturer/users/admin/msp/signcerts/cert.pem",
+    "keyPath": "/path/to/manufacturer/users/admin/msp/keystore/key.pem"
+  }
+}

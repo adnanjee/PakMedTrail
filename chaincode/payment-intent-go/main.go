@@ -22,7 +22,7 @@ Scope:
 - Stores RSK metadata: network, token, addresses, transaction hash.
 - Emits Fabric events consumed by an off-chain bridge service.
 
-Channel: rawmaterialsupply (shared with other supply chain chaincodes)
+Channel: pakmedtrail (shared with other PakMedTrail supply chain chaincodes)
 */
 
 // ---------------- Constants ----------------
@@ -62,23 +62,27 @@ type PaymentIntent struct {
 	FromMSP string `json:"fromMSP"` // payer org (caller at creation)
 	ToMSP   string `json:"toMSP"`   // payee org
 
-	// Amount & token
-	Amount           string `json:"amount"`                  // human amount, e.g. "100.00" or "0.5"
-	Currency         string `json:"currency,omitempty"`      // e.g. "RBTC","rUSD"
-	TokenSymbol      string `json:"tokenSymbol,omitempty"`   // e.g. "RBTC","USDR"
-	TokenContract    string `json:"tokenContract,omitempty"` // RSK ERC-20 address (if applicable)
-	TokenDecimalsStr string `json:"tokenDecimals,omitempty"` // e.g. "18" (string to avoid float issues)
-	RskNetwork       string `json:"rskNetwork,omitempty"`    // e.g. "testnet","mainnet"
+	// Amount & token. Do not use omitempty here: Fabric contract-api schema
+	// validation expects these fields to be present even when their value is
+	// intentionally empty at PENDING state, such as tokenContract for native
+	// RBTC payments.
+	Amount           string `json:"amount"`        // human amount, e.g. "100.00" or "0.5"
+	Currency         string `json:"currency"`      // e.g. "RBTC","rUSD"
+	TokenSymbol      string `json:"tokenSymbol"`   // e.g. "RBTC","USDR"
+	TokenContract    string `json:"tokenContract"` // RSK ERC-20 address, empty for native RBTC
+	TokenDecimalsStr string `json:"tokenDecimals"` // e.g. "18" (string to avoid float issues)
+	RskNetwork       string `json:"rskNetwork"`    // e.g. "testnet","mainnet"
 
-	// RSK addresses + tx
-	RskAddressFrom string `json:"rskAddressFrom,omitempty"` // bridge wallet / payer address
-	RskAddressTo   string `json:"rskAddressTo,omitempty"`   // recipient RSK address
-	RskTxHash      string `json:"rskTxHash,omitempty"`      // set once broadcast
+	// RSK addresses + tx. These are empty until the bridge broadcasts the RSK
+	// transaction, but they must still be returned in the JSON response.
+	RskAddressFrom string `json:"rskAddressFrom"` // bridge wallet / payer address
+	RskAddressTo   string `json:"rskAddressTo"`   // recipient RSK address
+	RskTxHash      string `json:"rskTxHash"`      // set once broadcast
 
 	// Status & metadata
-	Status    string            `json:"status"`              // PENDING / SENT / CONFIRMED / FAILED / CANCELLED
-	LastError string            `json:"lastError,omitempty"` // last failure / cancellation reason
-	Metadata  map[string]string `json:"metadata,omitempty"`  // free-form metadata for app/bridge
+	Status    string            `json:"status"`    // PENDING / SENT / CONFIRMED / FAILED / CANCELLED
+	LastError string            `json:"lastError"` // last failure / cancellation reason
+	Metadata  map[string]string `json:"metadata"`  // free-form metadata for app/bridge
 
 	CreatedAt string `json:"createdAt"`
 	UpdatedAt string `json:"updatedAt"`
@@ -173,15 +177,23 @@ func validatePaymentStatusTransition(oldStatus, newStatus string) error {
 }
 
 // Internal read/write helpers
+func normalizePayment(p *PaymentIntent) {
+	if p.Metadata == nil {
+		p.Metadata = map[string]string{}
+	}
+}
+
 func (c *PaymentContract) readPayment(ctx contractapi.TransactionContextInterface, paymentID string) (*PaymentIntent, error) {
 	var p PaymentIntent
 	if err := getJSON(ctx, paymentKey(paymentID), &p); err != nil {
 		return nil, err
 	}
+	normalizePayment(&p)
 	return &p, nil
 }
 
 func (c *PaymentContract) putPayment(ctx contractapi.TransactionContextInterface, p *PaymentIntent) error {
+	normalizePayment(p)
 	p.UpdatedAt = nowRFC3339(ctx)
 	return putJSON(ctx, paymentKey(p.PaymentID), p)
 }
@@ -262,10 +274,13 @@ func (c *PaymentContract) CreatePaymentIntent(
 		return nil, err
 	}
 
-	var md map[string]string
+	md := map[string]string{}
 	if strings.TrimSpace(metadataJSON) != "" {
 		if err := json.Unmarshal([]byte(metadataJSON), &md); err != nil {
 			return nil, fmt.Errorf("metadata JSON invalid: %w", err)
+		}
+		if md == nil {
+			md = map[string]string{}
 		}
 	}
 
@@ -493,7 +508,7 @@ func (c *PaymentContract) GetPaymentsByRef(
 	}
 	defer iter.Close()
 
-	var out []*PaymentIntent
+	out := []*PaymentIntent{}
 	for iter.HasNext() {
 		kv, err := iter.Next()
 		if err != nil {
@@ -501,6 +516,7 @@ func (c *PaymentContract) GetPaymentsByRef(
 		}
 		var p PaymentIntent
 		if err := json.Unmarshal(kv.Value, &p); err == nil && p.DocType == DocPaymentIntent {
+			normalizePayment(&p)
 			out = append(out, &p)
 		}
 	}
@@ -546,7 +562,7 @@ func (c *PaymentContract) GetPaymentsByParty(
 	}
 	defer iter.Close()
 
-	var out []*PaymentIntent
+	out := []*PaymentIntent{}
 	for iter.HasNext() {
 		kv, err := iter.Next()
 		if err != nil {
@@ -554,6 +570,7 @@ func (c *PaymentContract) GetPaymentsByParty(
 		}
 		var p PaymentIntent
 		if err := json.Unmarshal(kv.Value, &p); err == nil && p.DocType == DocPaymentIntent {
+			normalizePayment(&p)
 			out = append(out, &p)
 		}
 	}
@@ -580,7 +597,7 @@ func (c *PaymentContract) GetPaymentsByStatus(
 	}
 	defer iter.Close()
 
-	var out []*PaymentIntent
+	out := []*PaymentIntent{}
 	for iter.HasNext() {
 		kv, err := iter.Next()
 		if err != nil {
@@ -588,6 +605,7 @@ func (c *PaymentContract) GetPaymentsByStatus(
 		}
 		var p PaymentIntent
 		if err := json.Unmarshal(kv.Value, &p); err == nil && p.DocType == DocPaymentIntent {
+			normalizePayment(&p)
 			out = append(out, &p)
 		}
 	}
@@ -610,7 +628,7 @@ func (c *PaymentContract) GetAllPayments(ctx contractapi.TransactionContextInter
 	}
 	defer iter.Close()
 
-	var out []*PaymentIntent
+	out := []*PaymentIntent{}
 	for iter.HasNext() {
 		kv, err := iter.Next()
 		if err != nil {
@@ -618,6 +636,7 @@ func (c *PaymentContract) GetAllPayments(ctx contractapi.TransactionContextInter
 		}
 		var p PaymentIntent
 		if err := json.Unmarshal(kv.Value, &p); err == nil && p.DocType == DocPaymentIntent {
+			normalizePayment(&p)
 			out = append(out, &p)
 		}
 	}

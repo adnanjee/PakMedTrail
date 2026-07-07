@@ -28,7 +28,7 @@ import (
    - Rich queries + paginated queries
    - SBE to enforce dual-endorsement where appropriate
 
-   Channel: rawmaterialsupply
+   Channel: pakmedtrail
    External CC: manufacturing (finished drug batches)
 */
 
@@ -39,10 +39,14 @@ const (
 	mfgCCName  = "manufacturing"
 	mfgChannel = "" // same channel
 
+	// External recall/compliance chaincode
+	recallCCName  = "recall"
+	recallChannel = "" // same channel
+
 	// MSP IDs
 	mspDRAP        = "drapMSP"
 	mspDistributor = "distributorMSP" // informative
-	mspRetail      = "retailMSP"      // informative
+	mspRetail      = "retailerMSP"    // informative
 
 	// DocTypes
 	DocTypeShipment = "ret.shipment"
@@ -95,14 +99,14 @@ type Shipment struct {
 
 // Commercial terms (PDC)
 type ShipmentSensitive struct {
-	DocType    string   `json:"docType"` // "ret.shipment.sensitive"
-	ShipmentID string   `json:"shipmentId"`
-	PriceAmt   *float64 `json:"priceAmt,omitempty"`
-	Currency   string   `json:"currency,omitempty"`
-	Incoterms  string   `json:"incoterms,omitempty"`
-	Discount   *float64 `json:"discount,omitempty"`
-	Notes      string   `json:"notes,omitempty"`
-	UpdatedAt  string   `json:"updatedAt"`
+	DocType    string  `json:"docType"` // "ret.shipment.sensitive"
+	ShipmentID string  `json:"shipmentId"`
+	PriceAmt   float64 `json:"priceAmt,omitempty"`
+	Currency   string  `json:"currency,omitempty"`
+	Incoterms  string  `json:"incoterms,omitempty"`
+	Discount   float64 `json:"discount,omitempty"`
+	Notes      string  `json:"notes,omitempty"`
+	UpdatedAt  string  `json:"updatedAt"`
 }
 
 // Recall notice (kept in this CC; mirrors distribution pattern)
@@ -253,16 +257,16 @@ func (c *RetailContract) setSBE(ctx contractapi.TransactionContextInterface, key
 
 // CORRECTED: Fixed mfgBatch struct to match manufacturing chaincode
 type mfgBatch struct {
-	DocType         string  `json:"docType"`
-	BatchID         string  `json:"batchId"`
-	DrugCode        string  `json:"drugCode"`
-	Quantity        float64 `json:"quantity"`
-	Unit            string  `json:"unit"`
-	ProducerMSP     string  `json:"producerMSP"`     // NEVER CHANGES
-	CurrentOwnerMSP string  `json:"currentOwnerMSP"` // CHANGES - current owner (CRITICAL FIX)
-	Status          string  `json:"status"`
-	DRAPApproved    bool    `json:"drapApproved"`
-	ProposedOwnerMSP string `json:"proposedOwnerMSP,omitempty"`
+	DocType          string  `json:"docType"`
+	BatchID          string  `json:"batchId"`
+	DrugCode         string  `json:"drugCode"`
+	Quantity         float64 `json:"quantity"`
+	Unit             string  `json:"unit"`
+	ProducerMSP      string  `json:"producerMSP"`     // NEVER CHANGES
+	CurrentOwnerMSP  string  `json:"currentOwnerMSP"` // CHANGES - current owner (CRITICAL FIX)
+	Status           string  `json:"status"`
+	DRAPApproved     bool    `json:"drapApproved"`
+	ProposedOwnerMSP string  `json:"proposedOwnerMSP,omitempty"`
 }
 
 func mfgReadBatch(ctx contractapi.TransactionContextInterface, batchID string) (*mfgBatch, error) {
@@ -283,6 +287,51 @@ func mfgReadBatch(ctx contractapi.TransactionContextInterface, batchID string) (
 		return nil, fmt.Errorf("manufacturing.ReadBatch unmarshal: %w", err)
 	}
 	return &b, nil
+}
+
+// recallIsAssetUnderActiveRecall checks the external recall chaincode for active recall status.
+// This connects retail dispense verification to the DRAP recall workflow.
+func recallIsAssetUnderActiveRecall(ctx contractapi.TransactionContextInterface, assetType, assetID string) (bool, error) {
+	args := [][]byte{[]byte("IsAssetUnderActiveRecall"), []byte(assetType), []byte(assetID)}
+	resp := ctx.GetStub().InvokeChaincode(recallCCName, args, recallChannel)
+	if resp.Status != 200 {
+		var errorMsg string
+		if len(resp.Payload) > 0 {
+			errorMsg = string(resp.Payload)
+		} else {
+			errorMsg = "no error details provided"
+		}
+		return false, fmt.Errorf("recall.IsAssetUnderActiveRecall(%s,%s) failed: %s (status: %d)", assetType, assetID, errorMsg, resp.Status)
+	}
+	active, err := strconv.ParseBool(strings.TrimSpace(string(resp.Payload)))
+	if err != nil {
+		return false, fmt.Errorf("recall.IsAssetUnderActiveRecall response invalid: %q", string(resp.Payload))
+	}
+	return active, nil
+}
+
+// recallQuarantineStatusOn checks whether the external recall chaincode has an ON quarantine record.
+// A missing quarantine record is treated as not quarantined; other errors are returned.
+func recallQuarantineStatusOn(ctx contractapi.TransactionContextInterface, assetType, assetID string) (bool, error) {
+	args := [][]byte{[]byte("GetQuarantine"), []byte(assetType), []byte(assetID)}
+	resp := ctx.GetStub().InvokeChaincode(recallCCName, args, recallChannel)
+	if resp.Status != 200 {
+		payload := strings.TrimSpace(string(resp.Payload))
+		if strings.Contains(strings.ToLower(payload), "not found") {
+			return false, nil
+		}
+		if payload == "" {
+			payload = "no error details provided"
+		}
+		return false, fmt.Errorf("recall.GetQuarantine(%s,%s) failed: %s (status: %d)", assetType, assetID, payload, resp.Status)
+	}
+	var q struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(resp.Payload, &q); err != nil {
+		return false, fmt.Errorf("recall.GetQuarantine response invalid: %w", err)
+	}
+	return strings.EqualFold(strings.TrimSpace(q.Status), "ON"), nil
 }
 
 func mfgProposeTransfer(ctx contractapi.TransactionContextInterface, batchID, toMSP string) error {
@@ -463,12 +512,12 @@ func (c *RetailContract) AcceptRetailShipment(ctx contractapi.TransactionContext
 	if s.Status != ShipPending {
 		return nil, errors.New("shipment not in PENDING state")
 	}
-	
+
 	// Validate status transition
 	if err := c.validateShipmentStatusTransition(s.Status, ShipAccepted); err != nil {
 		return nil, err
 	}
-	
+
 	if err := mfgAcceptTransfer(ctx, s.BatchID); err != nil {
 		return nil, err
 	}
@@ -495,12 +544,12 @@ func (c *RetailContract) RejectRetailShipment(ctx contractapi.TransactionContext
 	if s.Status != ShipPending {
 		return nil, errors.New("shipment not in PENDING state")
 	}
-	
+
 	// Validate status transition
 	if err := c.validateShipmentStatusTransition(s.Status, ShipRejected); err != nil {
 		return nil, err
 	}
-	
+
 	if err := mfgRejectTransfer(ctx, s.BatchID, strings.TrimSpace(reason)); err != nil {
 		return nil, err
 	}
@@ -532,12 +581,12 @@ func (c *RetailContract) CancelRetailShipment(ctx contractapi.TransactionContext
 	if s.Status != ShipPending {
 		return nil, errors.New("shipment not in PENDING state")
 	}
-	
+
 	// Validate status transition
 	if err := c.validateShipmentStatusTransition(s.Status, ShipCancelled); err != nil {
 		return nil, err
 	}
-	
+
 	if err := mfgCancelTransfer(ctx, s.BatchID, strings.TrimSpace(reason)); err != nil {
 		return nil, err
 	}
@@ -569,12 +618,12 @@ func (c *RetailContract) MarkRetailDelivered(ctx contractapi.TransactionContextI
 	if s.Status != ShipAccepted {
 		return nil, errors.New("shipment must be ACCEPTED before delivery")
 	}
-	
+
 	// Validate status transition
 	if err := c.validateShipmentStatusTransition(s.Status, ShipDelivered); err != nil {
 		return nil, err
 	}
-	
+
 	s.Status = ShipDelivered
 	if err := c.putShipment(ctx, s); err != nil {
 		return nil, err
@@ -602,18 +651,18 @@ func (c *RetailContract) PutSensitive(
 		return nil, fmt.Errorf("only %s or %s can write sensitive terms", s.FromMSP, s.ToMSP)
 	}
 
-	var priceAmt *float64
+	var priceAmt float64
 	if strings.EqualFold(strings.TrimSpace(hasPriceStr), "true") {
 		if v, err := strconv.ParseFloat(strings.TrimSpace(priceAmtStr), 64); err == nil {
-			priceAmt = &v
+			priceAmt = v
 		} else {
 			return nil, fmt.Errorf("invalid price amount %q", priceAmtStr)
 		}
 	}
-	var discount *float64
+	var discount float64
 	if strings.EqualFold(strings.TrimSpace(hasDiscountStr), "true") {
 		if v, err := strconv.ParseFloat(strings.TrimSpace(discountStr), 64); err == nil {
-			discount = &v
+			discount = v
 		} else {
 			return nil, fmt.Errorf("invalid discount %q", discountStr)
 		}
@@ -763,12 +812,12 @@ func (c *RetailContract) QuarantineByRecall(ctx contractapi.TransactionContextIn
 	if !active {
 		return nil, errors.New("no ACTIVE recall for this batch")
 	}
-	
+
 	// Validate status transition
 	if err := c.validateShipmentStatusTransition(s.Status, ShipQuarantined); err != nil {
 		return nil, err
 	}
-	
+
 	s.Status = ShipQuarantined
 	if err := c.putShipment(ctx, s); err != nil {
 		return nil, err
@@ -814,13 +863,29 @@ func (c *RetailContract) VerifyDispense(
 	if b.CurrentOwnerMSP != callerMSP {
 		return nil, fmt.Errorf("caller MSP %s is not current owner %s of batch %s", callerMSP, b.CurrentOwnerMSP, batchID)
 	}
-	// Must not be under active recall
+	// Must not be under active recall or quarantine in the external DRAP recall chaincode.
+	externalActiveRecall, err := recallIsAssetUnderActiveRecall(ctx, "BATCH", batchID)
+	if err != nil {
+		return nil, err
+	}
+	if externalActiveRecall {
+		return nil, fmt.Errorf("batch %s is under ACTIVE recall in recall chaincode; cannot verify dispense", batchID)
+	}
+	externalQuarantined, err := recallQuarantineStatusOn(ctx, "BATCH", batchID)
+	if err != nil {
+		return nil, err
+	}
+	if externalQuarantined {
+		return nil, fmt.Errorf("batch %s is quarantined in recall chaincode; cannot verify dispense", batchID)
+	}
+
+	// Backward-compatible local retail recall check, retained for older retail-local recall records.
 	activeRecall, err := c.findActiveRecallForBatch(ctx, batchID)
 	if err != nil {
 		return nil, err
 	}
 	if activeRecall {
-		return nil, errors.New("batch is under ACTIVE recall; cannot verify dispense")
+		return nil, errors.New("batch is under ACTIVE recall in retail chaincode; cannot verify dispense")
 	}
 
 	qty, err := strconv.ParseFloat(strings.TrimSpace(quantityStr), 64)
@@ -860,7 +925,7 @@ func (c *RetailContract) UpdateShipmentMetadata(ctx contractapi.TransactionConte
 	if err != nil {
 		return nil, err
 	}
-	
+
 	callerMSP, _ := getMSP(ctx)
 	if callerMSP != s.FromMSP && callerMSP != s.ToMSP {
 		return nil, fmt.Errorf("only %s or %s can update shipment", s.FromMSP, s.ToMSP)
@@ -1143,10 +1208,10 @@ func queryShipmentsPaged(ctx contractapi.TransactionContextInterface, selectorJS
 func main() {
 	cc, err := contractapi.NewChaincode(new(RetailContract))
 	if err != nil {
-		panic(fmt.Errorf("create chaincode: %w", err)
+		panic(fmt.Errorf("create chaincode: %w", err))
 	}
 	if err := cc.Start(); err != nil {
-		panic(fmt.Errorf("start chaincode: %w", err)
+		panic(fmt.Errorf("start chaincode: %w", err))
 	}
 }
 
@@ -1194,18 +1259,15 @@ PDC collections_config.json (deploy with chaincode)
 [
   {
     "name": "collectionRetailSensitive",
-    "policy": {
-      "identities": [
-        {"role":{"name":"member","mspId":"distributorMSP"}},
-        {"role":{"name":"member","mspId":"retailMSP"}}
-      ],
-      "policy": {"2-of":[{"signed-by":0},{"signed-by":1}]}
-    },
+    "policy": "OR('distributorMSP.member','retailerMSP.member')",
     "requiredPeerCount": 1,
     "maxPeerCount": 2,
     "blockToLive": 0,
     "memberOnlyRead": true,
-    "memberOnlyWrite": true
+    "memberOnlyWrite": true,
+    "endorsementPolicy": {
+      "signaturePolicy": "AND('distributorMSP.peer','retailerMSP.peer')"
+    }
   }
 ]
 */

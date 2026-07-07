@@ -7,6 +7,9 @@
     "maxPeerCount": 2,
     "blockToLive": 0,
     "memberOnlyRead": true,
-    "memberOnlyWrite": true
+    "memberOnlyWrite": true,
+    "endorsementPolicy": {
+      "signaturePolicy": "AND('manufacturerMSP.peer','distributorMSP.peer')"
+    }
   }
 ]

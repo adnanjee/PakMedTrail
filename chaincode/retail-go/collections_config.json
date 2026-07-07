@@ -1,11 +1,14 @@
 [
   {
     "name": "collectionRetailSensitive",
-    "policy": "OR('distributorMSP.member','retailMSP.member')",
+    "policy": "OR('distributorMSP.member','retailerMSP.member')",
     "requiredPeerCount": 1,
     "maxPeerCount": 2,
     "blockToLive": 0,
     "memberOnlyRead": true,
-    "memberOnlyWrite": true
+    "memberOnlyWrite": true,
+    "endorsementPolicy": {
+      "signaturePolicy": "AND('distributorMSP.peer','retailerMSP.peer')"
+    }
   }
 ]

@@ -87,14 +87,14 @@ type Shipment struct {
 
 // ShipmentSensitive lives in a PDC visible to Manufacturer + Distributor
 type ShipmentSensitive struct {
-	DocType    string   `json:"docType"` // "ship.shipment.sensitive"
-	ShipmentID string   `json:"shipmentId"`
-	PriceAmt   *float64 `json:"priceAmt,omitempty"`
-	Currency   string   `json:"currency,omitempty"`
-	Incoterms  string   `json:"incoterms,omitempty"`
-	Discount   *float64 `json:"discount,omitempty"`
-	Notes      string   `json:"notes,omitempty"`
-	UpdatedAt  string   `json:"updatedAt"`
+	DocType    string  `json:"docType"` // "ship.shipment.sensitive"
+	ShipmentID string  `json:"shipmentId"`
+	PriceAmt   float64 `json:"priceAmt,omitempty"`
+	Currency   string  `json:"currency,omitempty"`
+	Incoterms  string  `json:"incoterms,omitempty"`
+	Discount   float64 `json:"discount,omitempty"`
+	Notes      string  `json:"notes,omitempty"`
+	UpdatedAt  string  `json:"updatedAt"`
 }
 
 // RecallNotice is created/closed by DRAP.
@@ -457,7 +457,7 @@ func (c *DistributionContract) MarkDelivered(ctx contractapi.TransactionContextI
 
 // ---------------- PDC: Commercial Terms ----------------
 
-const collectionDistSensitive = "collectionDistSensitive"
+const collectionDistSensitive = "collectionWholesaleSensitive"
 
 func (c *DistributionContract) PutSensitive(
 	ctx contractapi.TransactionContextInterface,
@@ -473,18 +473,18 @@ func (c *DistributionContract) PutSensitive(
 		return nil, fmt.Errorf("only %s or %s can write sensitive terms", s.FromMSP, s.ToMSP)
 	}
 
-	var priceAmt *float64
+	var priceAmt float64
 	if strings.EqualFold(strings.TrimSpace(hasPriceStr), "true") {
 		if v, err := strconv.ParseFloat(strings.TrimSpace(priceAmtStr), 64); err == nil {
-			priceAmt = &v
+			priceAmt = v
 		} else {
 			return nil, fmt.Errorf("invalid price amount %q", priceAmtStr)
 		}
 	}
-	var discount *float64
+	var discount float64
 	if strings.EqualFold(strings.TrimSpace(hasDiscountStr), "true") {
 		if v, err := strconv.ParseFloat(strings.TrimSpace(discountStr), 64); err == nil {
-			discount = &v
+			discount = v
 		} else {
 			return nil, fmt.Errorf("invalid discount %q", discountStr)
 		}

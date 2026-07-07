@@ -1,0 +1,37 @@
+{
+  "supplierMSP": {
+    "peerEndpoint": "192.168.100.20:7051",
+    "peerHostAlias": "192.168.100.20",
+    "tlsRootCertPath": "/home/adnan/peer_nodes_admin/supplier_peer_admin/msp/tlscacerts/tlsca.supplier.com-cert.pem",
+    "certPath": "/home/adnan/peer_nodes_admin/supplier_peer_admin/msp/signcerts/Admin@supplier.com-cert.pem",
+    "keyPath": "/home/adnan/peer_nodes_admin/supplier_peer_admin/msp/keystore/priv_sk"
+  },
+  "manufacturerMSP": {
+    "peerEndpoint": "192.168.100.30:7051",
+    "peerHostAlias": "192.168.100.30",
+    "tlsRootCertPath": "/home/adnan/peer_nodes_admin/manufacturer_peer_admin/msp/tlscacerts/tlsca.manufacturer.com-cert.pem",
+    "certPath": "/home/adnan/peer_nodes_admin/manufacturer_peer_admin/msp/signcerts/Admin@manufacturer.com-cert.pem",
+    "keyPath": "/home/adnan/peer_nodes_admin/manufacturer_peer_admin/msp/keystore/priv_sk"
+  },
+  "distributorMSP": {
+    "peerEndpoint": "192.168.100.40:7051",
+    "peerHostAlias": "192.168.100.40",
+    "tlsRootCertPath": "/home/adnan/peer_nodes_admin/distributor_peer_admin/msp/tlscacerts/tlsca.distributor.com-cert.pem",
+    "certPath": "/home/adnan/peer_nodes_admin/distributor_peer_admin/msp/signcerts/Admin@distributor.com-cert.pem",
+    "keyPath": "/home/adnan/peer_nodes_admin/distributor_peer_admin/msp/keystore/priv_sk"
+  },
+  "retailerMSP": {
+    "peerEndpoint": "192.168.100.50:7051",
+    "peerHostAlias": "192.168.100.50",
+    "tlsRootCertPath": "/home/adnan/peer_nodes_admin/retailer_peer_admin/msp/tlscacerts/tlsca.retailer.com-cert.pem",
+    "certPath": "/home/adnan/peer_nodes_admin/retailer_peer_admin/msp/signcerts/Admin@retailer.com-cert.pem",
+    "keyPath": "/home/adnan/peer_nodes_admin/retailer_peer_admin/msp/keystore/priv_sk"
+  },
+  "drapMSP": {
+    "peerEndpoint": "192.168.100.60:7051",
+    "peerHostAlias": "192.168.100.60",
+    "tlsRootCertPath": "/home/adnan/peer_nodes_admin/drap_peer_admin/msp/tlscacerts/tlsca.drap.com-cert.pem",
+    "certPath": "/home/adnan/peer_nodes_admin/drap_peer_admin/msp/signcerts/Admin@drap.com-cert.pem",
+    "keyPath": "/home/adnan/peer_nodes_admin/drap_peer_admin/msp/keystore/priv_sk"
+  }
+}

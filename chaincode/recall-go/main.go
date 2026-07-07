@@ -501,8 +501,16 @@ func (c *RecallContract) ListActiveRecalls(ctx contractapi.TransactionContextInt
 
 // GetQuarantine(assetType, assetId)
 func (c *RecallContract) GetQuarantine(ctx contractapi.TransactionContextInterface, assetTypeStr, assetID string) (*Quarantine, error) {
+	key := quarantineKey(AssetType(strings.ToUpper(strings.TrimSpace(assetTypeStr))), assetID)
+	b, err := ctx.GetStub().GetState(key)
+	if err != nil {
+		return nil, err
+	}
+	if len(b) == 0 {
+		return &Quarantine{}, nil
+	}
 	var q Quarantine
-	if err := getJSON(ctx, quarantineKey(AssetType(strings.ToUpper(strings.TrimSpace(assetTypeStr))), assetID), &q); err != nil {
+	if err := json.Unmarshal(b, &q); err != nil {
 		return nil, err
 	}
 	return &q, nil
